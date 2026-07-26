@@ -53,6 +53,8 @@ def _calculate_viable_epochs(model_key: str, sample_count: int, batch_size: int)
     
     if model_key.startswith("xtts_"):
         target_steps = 1500
+    elif model_key == "omnivoice":
+        target_steps = 5000
     elif model_key in ["tacotron2_capacitron", "tacotron2_dca", "tacotron2_ddc", "fast_pitch", "fast_speech", "fastspeech2"]:
         target_steps = 15000
     else:
@@ -63,7 +65,7 @@ def _calculate_viable_epochs(model_key: str, sample_count: int, batch_size: int)
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Headless workflow for Universal Coqui TTS fine-tuning.")
+    parser = argparse.ArgumentParser(description="Headless workflow for Universal TTS fine-tuning.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("list-models", help="List supported training recipes.")
@@ -85,7 +87,7 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--no-auto-split-sentences", dest="auto_split_sentences", action="store_false", help="Disable automatic sentence splitting for forced alignment")
     prepare.set_defaults(auto_split_sentences=True)
 
-    train = subparsers.add_parser("train", help="Train or fine-tune a selected Coqui recipe.")
+    train = subparsers.add_parser("train", help="Train or fine-tune a selected TTS model.")
     train.add_argument("--model", required=True, choices=[key for key, _ in dropdown_choices()])
     train.add_argument("--output-root", required=True)
     train.add_argument("--dataset-dir")

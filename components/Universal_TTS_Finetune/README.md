@@ -1,6 +1,6 @@
 # Universal_TTS_Finetune
 
-Universal Coqui & Rhasspy Piper TTS fine-tuning workflow with:
+Universal Coqui, Rhasspy Piper, and OmniVoice TTS fine-tuning workflow with:
 - a Gradio web GUI
 - a headless CLI
 - LJSpeech-style dataset generation from your own audio
@@ -9,7 +9,7 @@ Universal Coqui & Rhasspy Piper TTS fine-tuning workflow with:
 
 ## Supported models
 
-The current workflow targets the bundled `recipes/ljspeech` training recipes for these Coqui models:
+The current workflow supports these model families:
 
 - Align TTS
 - DelightfulTTS
@@ -27,8 +27,15 @@ The current workflow targets the bundled `recipes/ljspeech` training recipes for
 - XTTS v1
 - XTTS v2
 - Piper TTS (Rhasspy)
+- OmniVoice
 
 When Coqui publishes a matching pretrained checkpoint, the trainer can auto-download it and continue from it. Otherwise the workflow still prepares the recipe workspace and can train from a user-supplied checkpoint or recipe defaults.
+
+OmniVoice uses its official fine-tuning workflow: the prepared LJSpeech dataset
+is converted to JSONL, audio is tokenized into WebDataset shards, training runs
+through Accelerate, and the resulting Hugging Face-style checkpoint is packaged
+for testing. Python 3.12 or newer is required. Fine-tuning starts from
+`k2-fsa/OmniVoice`; training it from scratch is intentionally not exposed.
 
 ## What it does
 
@@ -59,7 +66,7 @@ including:
 
 ### 2. Train or fine-tune a model
 
-Pick one of the supported Coqui recipes, then train from the GUI or CLI.
+Pick one of the supported models, then train from the GUI or CLI.
 
 Training artifacts are written under:
 
@@ -206,6 +213,32 @@ python headless_cli.py train \
   --epochs 50 \
   --batch-size 16
 ```
+
+Fine-tune OmniVoice (the epoch count is converted to steps based on dataset
+size):
+
+```bash
+python headless_cli.py train \
+  --model omnivoice \
+  --output-root /absolute/path/to/output \
+  --dataset-dir /absolute/path/to/output/dataset/LJSpeech-1.1 \
+  --language en \
+  --epochs 100
+```
+
+To request an exact number of optimizer steps or adjust official training
+settings, use JSON overrides:
+
+```bash
+python headless_cli.py train \
+  --model omnivoice \
+  --output-root /absolute/path/to/output \
+  --language en \
+  --extra-overrides-json '{"steps": 5000, "learning_rate": 0.00001}'
+```
+
+OmniVoice defaults to SDPA attention for compatibility. Its audio tokenizer can
+be changed with the special `audio_tokenizer` override.
 
 Run the whole workflow in one command:
 

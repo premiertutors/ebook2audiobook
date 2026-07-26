@@ -9,6 +9,10 @@ sys.path.insert(0, str(_DIR))
 
 from utils.piper_utils import export_piper_onnx
 from utils.pipeline import _latest_matching_file, _finalize_training_artifacts
+from utils.omnivoice_utils import (
+    find_omnivoice_checkpoint,
+    package_omnivoice_checkpoint,
+)
 
 def main():
     if len(sys.argv) < 2:
@@ -24,11 +28,43 @@ def main():
     # Piper uses Lightning (.ckpt), Coqui uses standard PyTorch (.pth)
     has_ckpt = list(run_dir.glob("**/*.ckpt")) or list(run_dir.glob("*.ckpt"))
     has_pth = list(run_dir.glob("**/*.pth")) or list(run_dir.glob("*.pth"))
+    has_safetensors = list(run_dir.glob("**/model.safetensors"))
     
     # Try to infer model key from folder name: training_runs/<model_key>/<timestamp>
     model_key = run_dir.parent.name
     
-    if has_ckpt and (not has_pth or model_key == "piper"):
+    if model_key == "omnivoice" or has_safetensors:
+        print("Detected model family: OmniVoice (Hugging Face format)")
+        try:
+            checkpoint_dir = find_omnivoice_checkpoint(run_dir)
+            ready_dir = run_dir / "ready"
+            ready_dir.mkdir(parents=True, exist_ok=True)
+            ready_model = package_omnivoice_checkpoint(checkpoint_dir, ready_dir)
+            reference_wav = ready_dir / "reference.wav"
+            artifacts = {
+                "model_key": "omnivoice",
+                "model_label": "OmniVoice",
+                "family": "omnivoice",
+                "training_root": str(run_dir),
+                "dataset_dir": "",
+                "checkpoint": str(ready_model),
+                "config": str(ready_model / "config.json"),
+                "reference_wav": str(reference_wav) if reference_wav.exists() else "",
+                "log_path": str(run_dir / "training.log")
+                if (run_dir / "training.log").exists()
+                else "",
+                "unused_overrides": {},
+            }
+            artifacts_path = ready_dir / "artifacts.json"
+            artifacts_path.write_text(
+                json.dumps(artifacts, indent=2), encoding="utf-8"
+            )
+            print("Successfully packaged OmniVoice checkpoint and wrote artifacts.json!")
+        except Exception as e:
+            print(f"Error finalizing OmniVoice artifacts: {e}")
+            sys.exit(1)
+
+    elif has_ckpt and (not has_pth or model_key == "piper"):
         print("Detected model family: Piper (ONNX format)")
         
         preprocessed_dir = run_dir / "preprocessed"

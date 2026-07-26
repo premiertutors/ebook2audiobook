@@ -1541,6 +1541,216 @@ def load_dataset_info(dataset_dir: str) -> dict[str, Any]:
     return {}
 
 
+def _run_streaming_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    progress: ProgressCallback,
+    stream_logs: bool,
+) -> str:
+    stdout_lines: list[str] = []
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
+    register_active_process(process)
+    try:
+        if process.stdout:
+            for line in process.stdout:
+                stdout_lines.append(line)
+                if stream_logs:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                if progress:
+                    progress(line)
+        process.wait()
+    finally:
+        register_active_process(None)
+    output = "".join(stdout_lines)
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"Command failed with exit code {process.returncode}: {' '.join(command)}\n\n"
+            f"LOGS:\n{_tail_text(output, ERROR_LOG_TAIL_CHARS)}"
+        )
+    return output
+
+
+def _train_omnivoice(
+    *,
+    spec: Any,
+    training_root: Path,
+    dataset_root: Path,
+    dataset_info: dict[str, Any],
+    language: str,
+    epochs: int,
+    batch_size: int,
+    grad_accum: int,
+    restore_path: str | None,
+    use_pretrained: bool,
+    extra_overrides: dict[str, Any],
+    dry_run: bool,
+    progress: ProgressCallback,
+    stream_logs: bool,
+) -> dict[str, Any]:
+    from utils.omnivoice_utils import (
+        DEFAULT_AUDIO_TOKENIZER,
+        build_omnivoice_configs,
+        build_tokenize_command,
+        build_train_command,
+        calculate_training_steps,
+        create_omnivoice_manifests,
+        find_omnivoice_checkpoint,
+        package_omnivoice_checkpoint,
+    )
+
+    if not use_pretrained and not restore_path:
+        raise ValueError(
+            "OmniVoice training from scratch is not supported by this workflow. "
+            "Enable the pretrained model or provide a checkpoint."
+        )
+
+    workspace_dir = training_root / "workspace"
+    token_dir = workspace_dir / "tokens"
+    output_dir = training_root / "checkpoints"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifests = create_omnivoice_manifests(dataset_root, workspace_dir, language)
+
+    overrides = dict(extra_overrides)
+    tokenizer_path = str(overrides.pop("audio_tokenizer", DEFAULT_AUDIO_TOKENIZER))
+    explicit_steps = overrides.pop("steps", None)
+    steps = (
+        int(explicit_steps)
+        if explicit_steps is not None
+        else calculate_training_steps(
+            epochs, manifests["sample_counts"]["train"], batch_size
+        )
+    )
+    if steps < 1:
+        raise ValueError("OmniVoice training steps must be at least 1.")
+    resolved_restore = (
+        str(_resolve_user_path(restore_path, must_exist=True))
+        if restore_path
+        else None
+    )
+    train_config, data_config, unused_overrides = build_omnivoice_configs(
+        workspace_dir,
+        token_dir=token_dir,
+        output_dir=output_dir,
+        base_model=spec.official_model_id,
+        restore_path=resolved_restore,
+        steps=steps,
+        grad_accum=grad_accum,
+        include_dev=manifests["sample_counts"]["dev"] > 0,
+        extra_overrides=overrides,
+    )
+    tokenize_commands = [
+        build_tokenize_command(
+            sys.executable,
+            input_jsonl=Path(manifests[f"{split}_jsonl"]),
+            token_dir=token_dir,
+            split=split,
+            tokenizer_path=tokenizer_path,
+        )
+        for split in ("train", "dev")
+        if manifests["sample_counts"][split] > 0
+    ]
+    train_command = build_train_command(
+        sys.executable,
+        train_config=train_config,
+        data_config=data_config,
+        output_dir=output_dir,
+    )
+    run_summary = {
+        "model_key": spec.key,
+        "model_label": spec.label,
+        "family": spec.family,
+        "training_root": str(training_root),
+        "workspace_root": str(workspace_dir),
+        "dataset_dir": str(dataset_root),
+        "train_config": str(train_config),
+        "data_config": str(data_config),
+        "steps": steps,
+        "sample_counts": manifests["sample_counts"],
+        "tokenize_commands": tokenize_commands,
+        "train_command": train_command,
+        "unused_overrides": unused_overrides,
+    }
+    if dry_run:
+        run_summary["status"] = "dry-run"
+        return run_summary
+
+    try:
+        import omnivoice  # noqa: F401
+        import accelerate  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "OmniVoice fine-tuning requires Python 3.12+ and the OmniVoice "
+            "training dependencies. Re-run the ebook2audiobook dependency installer."
+        ) from exc
+
+    log_parts: list[str] = []
+    for split, command in zip(
+        [name for name in ("train", "dev") if manifests["sample_counts"][name] > 0],
+        tokenize_commands,
+    ):
+        _notify(progress, f"Tokenizing OmniVoice {split} audio...")
+        log_parts.append(
+            _run_streaming_command(
+                command,
+                cwd=workspace_dir,
+                progress=progress,
+                stream_logs=stream_logs,
+            )
+        )
+    _notify(progress, f"Fine-tuning OmniVoice for {steps} steps...")
+    log_parts.append(
+        _run_streaming_command(
+            train_command,
+            cwd=workspace_dir,
+            progress=progress,
+            stream_logs=stream_logs,
+        )
+    )
+    log_path = training_root / "training.log"
+    log_path.write_text("\n".join(log_parts), encoding="utf-8")
+
+    checkpoint_dir = find_omnivoice_checkpoint(output_dir)
+    ready_dir = training_root / "ready"
+    ready_dir.mkdir(parents=True, exist_ok=True)
+    ready_model = package_omnivoice_checkpoint(checkpoint_dir, ready_dir)
+    reference_wav = _pick_reference_wav(dataset_root, dataset_info)
+    ready_reference = ""
+    if reference_wav:
+        ready_reference_path = ready_dir / "reference.wav"
+        shutil.copy2(reference_wav, ready_reference_path)
+        ready_reference = str(ready_reference_path)
+    artifacts = {
+        "model_key": spec.key,
+        "model_label": spec.label,
+        "family": spec.family,
+        "training_root": str(training_root),
+        "dataset_dir": str(dataset_root),
+        "checkpoint": str(ready_model),
+        "config": str(ready_model / "config.json"),
+        "reference_wav": ready_reference,
+        "language": language,
+        "log_path": str(log_path),
+        "unused_overrides": unused_overrides,
+    }
+    artifacts_path = ready_dir / "artifacts.json"
+    artifacts_path.write_text(
+        json.dumps(_json_ready(artifacts), indent=2), encoding="utf-8"
+    )
+    artifacts["artifacts_file"] = str(artifacts_path)
+    return artifacts
+
+
 def train_model(
     *,
     model_key: str,
@@ -1567,6 +1777,28 @@ def train_model(
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     training_root = output_root_path / "training_runs" / model_key / timestamp
     training_root.mkdir(parents=True, exist_ok=True)
+
+    extra_overrides = json.loads(extra_overrides_json) if extra_overrides_json else {}
+    if extra_overrides_json and not isinstance(extra_overrides, dict):
+        raise ValueError("extra_overrides_json must be a JSON object.")
+
+    if model_key == "omnivoice":
+        return _train_omnivoice(
+            spec=spec,
+            training_root=training_root,
+            dataset_root=dataset_root,
+            dataset_info=dataset_info,
+            language=language,
+            epochs=epochs,
+            batch_size=batch_size,
+            grad_accum=grad_accum,
+            restore_path=restore_path,
+            use_pretrained=use_pretrained,
+            extra_overrides=extra_overrides,
+            dry_run=dry_run,
+            progress=progress,
+            stream_logs=stream_logs,
+        )
 
     if model_key == "piper":
         from utils.piper_utils import (
@@ -1706,10 +1938,6 @@ def train_model(
         return artifacts
 
     computed_restore_path = _download_restore_path(model_key, use_pretrained, restore_path, progress)
-    extra_overrides = json.loads(extra_overrides_json) if extra_overrides_json else {}
-    if extra_overrides_json and not isinstance(extra_overrides, dict):
-        raise ValueError("extra_overrides_json must be a JSON object.")
-
     reference_wav = _pick_reference_wav(dataset_root, dataset_info)
     workspace_root, script_path = _prepare_workspace(model_key, dataset_root, training_root)
     unused_overrides = _patch_recipe_script(
@@ -1878,6 +2106,40 @@ def _load_tts_runtime(artifacts: dict[str, Any], progress: ProgressCallback) -> 
     return runtime
 
 
+def _load_omnivoice_runtime(artifacts: dict[str, Any]) -> Any:
+    cache_key = json.dumps(
+        {"family": artifacts["family"], "checkpoint": artifacts["checkpoint"]},
+        sort_keys=True,
+    )
+    if cache_key in MODEL_CACHE:
+        return MODEL_CACHE[cache_key]
+    try:
+        from omnivoice import OmniVoice
+    except ImportError as exc:
+        raise RuntimeError(
+            "OmniVoice is not installed. Re-run the ebook2audiobook dependency installer."
+        ) from exc
+    if torch.cuda.is_available():
+        device = "cuda"
+        dtype = torch.float16
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+        dtype = torch.float16
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        device = "xpu"
+        dtype = torch.float16
+    else:
+        device = "cpu"
+        dtype = torch.float32
+    runtime = OmniVoice.from_pretrained(
+        artifacts["checkpoint"],
+        device_map=device,
+        dtype=dtype,
+    )
+    MODEL_CACHE[cache_key] = runtime
+    return runtime
+
+
 def synthesize(
     *,
     artifacts_path_or_dir: str,
@@ -1930,6 +2192,23 @@ def synthesize(
             text=text,
             output_wav_path=str(output_path)
         )
+    elif artifacts["family"] == "omnivoice":
+        _notify(progress, "Loading OmniVoice model...")
+        runtime = _load_omnivoice_runtime(artifacts)
+        generate_args: dict[str, Any] = {
+            "text": text,
+            "language": language or artifacts.get("language"),
+        }
+        if speaker_reference:
+            generate_args["ref_audio"] = speaker_reference
+        _notify(progress, "Generating speech...")
+        with torch.inference_mode():
+            output = runtime.generate(**generate_args)
+        if not output:
+            raise RuntimeError("OmniVoice returned no audio.")
+        waveform = torch.as_tensor(output[0], dtype=torch.float32).unsqueeze(0)
+        sample_rate = int(getattr(runtime, "sampling_rate", 24000))
+        _save_waveform(output_path, waveform, sample_rate)
     else:
         _notify(progress, "Loading TTS model...")
         runtime = _load_tts_runtime(artifacts, progress)

@@ -29,6 +29,7 @@ except ImportError:
     pass
 
 import argparse
+import math
 import os
 import re
 import json
@@ -204,18 +205,24 @@ def get_adaptive_defaults(model_key: str, dataset_dir: gr.Dropdown | str | None)
             resolved_dir = val.strip()
             
     duration_seconds = 0.0
+    sample_count = 0
     if resolved_dir:
         try:
             info_file = Path(resolved_dir) / "dataset_info.json"
             if info_file.exists():
                 info = json.loads(info_file.read_text(encoding="utf-8"))
                 duration_seconds = float(info.get("total_audio_seconds", 0.0))
+                sample_count = int(info.get("created_sample_count", 0))
         except Exception:
             pass
             
     is_piper = "piper" in model_key.lower() if model_key else False
     
-    if is_piper:
+    if model_key == "omnivoice":
+        batch_size = 8
+        steps_per_epoch = max(1, math.ceil(max(1, sample_count) / batch_size))
+        epochs = max(1, math.ceil(5000 / steps_per_epoch))
+    elif is_piper:
         if duration_seconds == 0:
             epochs = 100
             batch_size = 8
@@ -616,8 +623,27 @@ def update_training_options(model_key, language, use_pretrained):
             msg += "**Training from scratch** (random initialization). *Note: training a large GPT model like XTTS from scratch requires massive amounts of data and compute. Fine-tuning is highly recommended.*"
         return msg, gr.update(interactive=True)
 
-    # 2. Piper family
-    elif family == "piper":
+    # 2. OmniVoice family
+    if family == "omnivoice":
+        msg = (
+            f"🟢 **{model_label}** fine-tuning uses the official audio-token "
+            "pipeline with SDPA attention for broader hardware compatibility.\n\n"
+        )
+        if use_pretrained:
+            msg += (
+                f"Training starts from `{official_model_id}`. The Epochs control "
+                "is converted to optimizer steps from the selected dataset size; "
+                'set an exact value with `{"steps": 5000}` in config overrides.'
+            )
+        else:
+            msg += (
+                "**A pretrained or resumed checkpoint is required.** Full "
+                "from-scratch OmniVoice pretraining is intentionally not exposed."
+            )
+        return msg, gr.update(interactive=True)
+
+    # 3. Piper family
+    if family == "piper":
         from utils.piper_utils import resolve_piper_checkpoint, get_voices_json_languages
         try:
             checkpoint_info = resolve_piper_checkpoint(language)
@@ -866,7 +892,12 @@ if __name__ == "__main__":
                 allow_custom_value=True,
                 interactive=True,
             )
-            train_language = gr.Dropdown(label="Model language (XTTS/Piper support multilingual)", choices=LANGUAGE_CHOICES, value="en")
+            train_language = gr.Dropdown(
+                label="Model language (custom OmniVoice IDs accepted)",
+                choices=LANGUAGE_CHOICES,
+                value="en",
+                allow_custom_value=True,
+            )
             with gr.Row():
                 restore_model_dropdown = gr.Dropdown(
                     label="Resume from previous training run",
@@ -876,7 +907,7 @@ if __name__ == "__main__":
                 )
                 restore_path = gr.Textbox(label="Optional checkpoint to continue from", value="")
             use_pretrained = gr.Checkbox(label="Auto-download matching pretrained model when available", value=True)
-            num_epochs = gr.Slider(label="Epochs", minimum=1, maximum=1000, step=1, value=args.num_epochs)
+            num_epochs = gr.Slider(label="Epochs", minimum=1, maximum=10000, step=1, value=args.num_epochs)
             batch_size = gr.Slider(label="Batch size", minimum=1, maximum=128, step=1, value=args.batch_size)
             grad_accum = gr.Slider(label="Grad accumulation", minimum=1, maximum=128, step=1, value=args.grad_acumm)
             max_audio_length = gr.Slider(label="Max audio length (seconds)", minimum=2, maximum=30, step=1, value=args.max_audio_length)
@@ -925,7 +956,12 @@ if __name__ == "__main__":
                 type="filepath",
                 sources=["upload"],
             )
-            infer_language = gr.Dropdown(label="Inference language", choices=LANGUAGE_CHOICES, value="en")
+            infer_language = gr.Dropdown(
+                label="Inference language",
+                choices=LANGUAGE_CHOICES,
+                value="en",
+                allow_custom_value=True,
+            )
             tts_text = gr.Textbox(label="Input text", value="This fine-tuned model is ready to test.")
             infer_status = gr.Textbox(label="Status", interactive=False)
             generated_audio = gr.Audio(label="Generated audio")

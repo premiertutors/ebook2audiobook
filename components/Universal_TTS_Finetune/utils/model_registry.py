@@ -170,6 +170,20 @@ MODEL_SPECS = (
         supports_language=True,
         requires_speaker_wav=False,
     ),
+    ModelSpec(
+        key="omnivoice",
+        label="OmniVoice",
+        recipe_dir="omnivoice",
+        train_script="official fine-tuning pipeline",
+        family="omnivoice",
+        official_model_id="k2-fsa/OmniVoice",
+        supports_language=True,
+        requires_speaker_wav=False,
+        notes=(
+            "Uses OmniVoice's JSONL/audio-token fine-tuning pipeline. "
+            "SDPA attention is used by default for broad hardware compatibility."
+        ),
+    ),
 )
 
 MODEL_SPECS_BY_KEY = {spec.key: spec for spec in MODEL_SPECS}
