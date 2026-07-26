@@ -1,5 +1,6 @@
-import os, re
+import os, re, sys
 from lib.conf import tts_dir, voices_dir
+from lib.conf_omnivoice import load_omnivoice_languages
 
 loaded_tts = {}
 xtts_builtin_speakers_list = {}
@@ -15,6 +16,9 @@ TTS_ENGINES = {
     "TACOTRON": "tacotron",
     "YOURTTS": "yourtts"
 }
+
+if sys.version_info >= (3, 12):
+    TTS_ENGINES["OMNIVOICE"] = "omnivoice"
 
 TTS_VOICE_CONVERSION = {
     "freevc24": {"path": "voice_conversion_models/multilingual/vctk/freevc24", "samplerate": 24000},
@@ -68,6 +72,8 @@ default_speaker = os.path.join(voices_dir, 'eng', 'adult', 'male', 'KumarDahl.wa
 tts_engines_from_coqui = [TTS_ENGINES['XTTS'], TTS_ENGINES['BARK'], TTS_ENGINES['TORTOISE'], TTS_ENGINES['VITS'], TTS_ENGINES['FAIRSEQ'], TTS_ENGINES['GLOWTTS'], TTS_ENGINES['TACOTRON'], TTS_ENGINES['YOURTTS']]
 tts_engines_with_inner_speaker = [TTS_ENGINES['PIPER'], TTS_ENGINES['VITS'], TTS_ENGINES['FAIRSEQ'], TTS_ENGINES['GLOWTTS'], TTS_ENGINES['TACOTRON'], TTS_ENGINES['YOURTTS']]
 tts_engines_with_custom_model = (TTS_ENGINES['PIPER'], TTS_ENGINES['XTTS'], TTS_ENGINES['VITS'], TTS_ENGINES['FAIRSEQ'])
+
+omnivoice_languages, _ = load_omnivoice_languages()
 
 max_custom_model = 100
 max_custom_voices = 1000
@@ -287,3 +293,14 @@ default_engine_settings = {
         "rating": {"VRAM": 1, "CPU": 5, "RAM": 1, "Realism": 2}
     }
 }
+
+if "OMNIVOICE" in TTS_ENGINES:
+    default_engine_settings[TTS_ENGINES["OMNIVOICE"]] = {
+        "repo": "k2-fsa/OmniVoice",
+        "languages": omnivoice_languages,
+        "samplerate": 24000,
+        "files": [],
+        "voice": default_speaker,
+        "voices": {},
+        "rating": {"VRAM": 12, "CPU": 1, "RAM": 16, "Realism": 5}
+    }

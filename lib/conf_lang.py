@@ -2072,3 +2072,12 @@ language_mapping = {
     "zos": {"name": "Zoque, Francisco León", "native_name": "Francisco León Zoque", "max_chars": 182, "script": "latin"},
     "gnd": {"name": "Zulgo-Gemzek", "native_name": "Zulgo-Gemzek", "max_chars": 182, "script": "latin"}
 }
+
+# OmniVoice includes languages that are not present in the existing catalog.
+# Preserve all existing metadata and add only the missing official entries.
+from lib.conf_omnivoice import load_omnivoice_languages
+
+_, _omnivoice_language_metadata = load_omnivoice_languages()
+for _iso3, _metadata in _omnivoice_language_metadata.items():
+    language_mapping.setdefault(_iso3, _metadata)
+del _iso3, _metadata, _omnivoice_language_metadata

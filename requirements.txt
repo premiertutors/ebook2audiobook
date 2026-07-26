@@ -67,7 +67,8 @@ pyannote-audio>=4.0.0; python_version >= '3.12'
 huggingface_hub>=0.36.2,<1.0; python_version < '3.12'
 huggingface_hub>=1.0; python_version >= '3.12'
 transformers==4.57.6; python_version < '3.12'
-transformers>=5.0.0; python_version >= '3.12'
+transformers>=5.3.0; python_version >= '3.12'
 coqui-tts[languages]==0.27.5
 piper-tts==1.4.2
+omnivoice==0.2.1; python_version >= '3.12'
 ./ext/py/demucs
