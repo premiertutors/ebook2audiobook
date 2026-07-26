@@ -10,7 +10,7 @@ from .conf import (
     requirements_file, components_dir, root_dir, tmp_dir, run_dir, gradio_cache_dir, tmp_expire, max_ebook_textarea_length,
     tts_dir, voice_formats, voices_dir, default_output_split, default_output_split_hours,
     default_abs_enabled, default_abs_server_url, default_abs_api_token, default_abs_library_id,
-    default_abs_auto_upload
+    default_abs_auto_upload, sentence_granularity, emit_sync_map, sync_map_schema_version
 )
 
 from .conf_lang import (
@@ -57,5 +57,5 @@ __all__ = [
     "loaded_tts", "xtts_builtin_speakers_list", "max_custom_model",
     "max_custom_voices", "voices_dir",
     "default_abs_enabled", "default_abs_server_url", "default_abs_api_token", "default_abs_library_id",
-    "default_abs_auto_upload"
+    "default_abs_auto_upload", "sentence_granularity", "emit_sync_map", "sync_map_schema_version"
 ]

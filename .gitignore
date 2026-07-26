@@ -20,3 +20,8 @@ models/*
 !audiobooks/gui/gradio/.gitkeep
 !audiobooks/gui/host/.gitkeep
 .installed
+# read-along fork (premiertutors/books) — local runtime artefacts
+.venv/
+.device_info.json
+voices/*
+!voices/.gitkeep
