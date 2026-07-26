@@ -1239,7 +1239,16 @@ INTO A NEW TRAINING MODEL. YOU CAN IMPROVE IT OR ASK TO A TRAINING MODEL EXPERT.
                         nt for item in toc if hasattr(item, 'title')
                         if (nt := normalize_text(str(item.title), session['language'], session['language_iso1'], session['tts_engine'])) is not None
                 ]
-                for item in toc:
+                def _flatten_toc(entries):
+                    # EbookLib represents nested TOC levels as (Section/Link, children)
+                    # tuples, so a flat iteration only sees the top level.
+                    for entry in entries or []:
+                        if isinstance(entry, (tuple, list)):
+                            for sub in entry:
+                                yield from _flatten_toc(sub if isinstance(sub, (tuple, list)) else [sub])
+                        else:
+                            yield entry
+                for item in _flatten_toc(toc):
                     href = str(getattr(item, 'href', '') or '').split('#', 1)[0]
                     title = str(getattr(item, 'title', '') or '').strip()
                     if href and title:
@@ -1902,8 +1911,10 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
         if not session:
             return None
         lang = session['language']
+        lang_iso1 = session.get('language_iso1')
         if session.get('translate_enabled') and session.get('translate'):
             lang = session['translate']
+            lang_iso1 = session.get('translate_iso1')
         tts_engine = session['tts_engine']
         max_chars = int(language_mapping[lang]['max_chars'] / 2)
 
@@ -1921,11 +1932,11 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
         # we have for fragments[].src offsets. A sentence over the engine's
         # character limit is still sub-split via _force_split_segment; that is a
         # sub-sentence fragment, which the contract allows.
-        if sentence_granularity and (session.get('language_iso1') in _PYSBD_LANGUAGES):
+        if sentence_granularity and (lang_iso1 in _PYSBD_LANGUAGES):
             # Full engine budget here, not the halved one upstream uses for its
             # packer: we only ever sub-split a sentence that genuinely exceeds it.
             max_chars = int(language_mapping[lang]['max_chars'])
-            spans = _sentence_spans(text, session['language_iso1'], max_chars,
+            spans = _sentence_spans(text, lang_iso1, max_chars,
                                     _clean_len, _strip_escaped_sml, _strip_leading_noise,
                                     _force_split_segment)
             if spans:
@@ -3230,6 +3241,13 @@ def combine_audio_chapters(session_id:str)->list[str]|None:
                 return False
             if emit_sync_map:
                 sync_map_path = os.path.join(session['audiobooks_dir'], f'{Path(final_file).stem}.sync-map.json')
+                normalised_text_path = sync_map_path.replace('.sync-map.json', '.normalised-text.json')
+                # A stale pair from a previous build of this same stem must not survive
+                # a failed regeneration: the audio/VTT above were just overwritten, so a
+                # leftover sync map would describe the wrong timings/offsets for them.
+                for stale_path in (sync_map_path, normalised_text_path):
+                    if os.path.exists(stale_path):
+                        os.unlink(stale_path)
                 sync_built, sync_error = build_sync_map_file(
                     session,
                     sync_map_path=sync_map_path,
@@ -3241,7 +3259,9 @@ def combine_audio_chapters(session_id:str)->list[str]|None:
                 if not sync_built:
                     # The audiobook and its VTT are already correct; the sync map is
                     # an extra artefact, so a failure here is loud but not fatal.
-                    print(f'build_sync_map_file() error: {sync_error}')
+                    error = f'build_sync_map_file() error: {sync_error}'
+                    print(error)
+                    show_alert(session_id, {'type': 'warning', 'msg': error})
             return True
         except Exception as e:
             error = f'Export failed: {e}'
@@ -3898,15 +3918,23 @@ def convert_ebook(args:dict)->tuple:
                                 blocks_orig = load_json_blocks(session['blocks_orig_json'])
                                 if blocks_orig:
                                     blocks = blocks_orig.get('blocks', [])
+                                    sources = blocks_orig.get('block_sources', [])
                                     new_blocks = []
-                                    for block in blocks:
+                                    new_sources = []
+                                    for i, block in enumerate(blocks):
                                         if any(c.isalnum() for c in block.get('text','')):
                                             if not block.get('id'):
                                                 block['id'] = str(uuid.uuid4())
                                                 is_changed = True
                                             new_blocks.append(block)
+                                            new_sources.append(sources[i] if i < len(sources) else None)
                                     blocks_orig['blocks'] = new_blocks
+                                    blocks_orig['block_sources'] = new_sources
                                     session['blocks_orig'] = blocks_orig
+                                    # Restore the source metadata this session's own get_blocks()
+                                    # never ran to populate — a resumed process without an EPUB
+                                    # change loads blocks_orig_json and skips get_blocks() entirely.
+                                    session['block_sources'] = new_sources
                                 if is_changed:
                                     save_json_blocks(session_id, 'blocks_orig')
                             # load previous work unconditionally: it must survive a source file change
@@ -4001,6 +4029,10 @@ def convert_ebook(args:dict)->tuple:
                                                         }
                                                         for t in raw_blocks if t
                                                     ],
+                                                    # Persisted so a resumed process — which loads
+                                                    # this JSON instead of re-running get_blocks() —
+                                                    # still has the chapters[].href/title source.
+                                                    "block_sources": session['block_sources'],
                                                 }
                                             if session.get('blocks_orig', {}):
                                                 if blocks_orig_old:

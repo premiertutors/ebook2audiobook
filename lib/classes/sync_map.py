@@ -76,9 +76,16 @@ def _normalise_with_map(source: str) -> tuple[str, list[int]]:
 
 
 def _slug(value: str) -> str:
-    slug = re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')
-    slug = re.sub(r'^[^a-z0-9]+', '', slug)
-    return slug or 'book'
+    text = str(value)
+    slug = re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')
+    if slug:
+        return slug
+    # Scripts with no ASCII letters/digits (CJK, Arabic, Cyrillic, ...) would
+    # otherwise all collapse to the same 'book' placeholder, colliding in any
+    # consumer keyed by bookId. A stable hash of the original value keeps them
+    # distinct while still producing an id restricted to [a-z0-9-].
+    digest = hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]
+    return f'book-{digest}'
 
 
 def _sha256_file(path: str) -> str | None:
@@ -180,8 +187,12 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
                 if not audio_file.is_file():
                     return False, f"Missing audio file for block {i}, sentence {sentence_idx}: {audio_file}"
                 span_start, span_end = spans[sentence_idx]
-                char_start = index_map[span_start] - lead
-                char_end = index_map[span_end] - lead
+                # A span that starts inside the stripped leading run (an SML tag,
+                # whitespace, or both) maps to a position at or before `lead`; that
+                # is the start of the stripped chapter_text, i.e. offset 0 — not a
+                # negative index, which Python would silently wrap from the end.
+                char_start = max(0, index_map[span_start] - lead)
+                char_end = max(0, index_map[span_end] - lead)
                 # Stripping the tags can expose whitespace at either edge; the
                 # fragment's own text is stripped, so the span must be too.
                 while char_start < char_end and chapter_text[char_start].isspace():
