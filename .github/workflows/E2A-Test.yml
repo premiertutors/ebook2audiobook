@@ -141,7 +141,7 @@ jobs:
        
             # Reset to base branch
             git checkout -B "$BASE_REF" "remotes/origin/$BASE_REF"
-            git reset --hard "origin/$BASE_REF"
+            git reset --hard "refs/remotes/origin/$BASE_REF"
        
             # Merge PR source
             if ! git merge --no-ff --no-edit "refs/remotes/pr/head"; then
