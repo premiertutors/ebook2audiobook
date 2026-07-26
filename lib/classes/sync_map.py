@@ -36,6 +36,45 @@ def _normalised_text(raw: str) -> str:
     return re.sub(r'\s+', ' ', SML_TAG_PATTERN.sub('', str(raw))).strip()
 
 
+def _normalise_with_map(source: str) -> tuple[str, list[int]]:
+    """Normalise a chapter and keep an index map onto the result.
+
+    ``fragments[].src`` offsets must slice the normalised chapter text and
+    reproduce the fragment's ``text`` verbatim, so the offsets have to be
+    expressed in the coordinates of the *normalised* string — not the block text,
+    which still carries the [pause]/[break] directives that are never spoken.
+
+    Returns ``(normalised, index_map)`` where ``index_map[i]`` is the normalised
+    index that ``source[i]`` maps to; a deleted character maps to the position the
+    next surviving character occupies. The transform is character-for-character
+    equivalent to :func:`_normalised_text` minus the final strip, which the caller
+    applies once per chapter.
+    """
+    out: list[str] = []
+    index_map = [0] * (len(source) + 1)
+    i = 0
+    length = len(source)
+    while i < length:
+        tag = SML_TAG_PATTERN.match(source, i)
+        if tag and tag.end() > i:
+            for k in range(i, tag.end()):
+                index_map[k] = len(out)
+            i = tag.end()
+            continue
+        index_map[i] = len(out)
+        char = source[i]
+        if char.isspace():
+            # A whitespace run collapses to one space, exactly as re.sub(r'\s+', ' ')
+            # would — including a leading run, which the caller's strip removes.
+            if not out or out[-1] != ' ':
+                out.append(' ')
+        else:
+            out.append(char)
+        i += 1
+    index_map[length] = len(out)
+    return ''.join(out), index_map
+
+
 def _slug(value: str) -> str:
     slug = re.sub(r'[^a-z0-9]+', '-', str(value).lower()).strip('-')
     slug = re.sub(r'^[^a-z0-9]+', '', slug)
@@ -82,7 +121,7 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
         sources = list(session.get('block_sources') or [])
 
         chapters: list[dict] = []
-        chapter_source_block: dict[int, int] = {}
+        normalised_chapters: dict[int, dict] = {}
         fragments: list[dict] = []
         pending: list[tuple[Path, str, int, int, str]] = []  # file, text, charStart, charEnd, href
 
@@ -127,6 +166,12 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
                 )
             href = source['href']
 
+            # Re-express the spans in the coordinates of the NORMALISED chapter
+            # text, which is the string the sidecar ships and the contract slices.
+            chapter_text, index_map = _normalise_with_map(block['text'])
+            lead = len(chapter_text) - len(chapter_text.lstrip())
+            chapter_text = chapter_text.strip()
+
             first_fragment = len(pending)
             for sentence_idx, sentence in enumerate(block_sentences):
                 if not any(c.isalnum() for c in str(sentence)):
@@ -134,10 +179,29 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
                 audio_file = block_dir / f'{sentence_idx}.{default_audio_proc_format}'
                 if not audio_file.is_file():
                     return False, f"Missing audio file for block {i}, sentence {sentence_idx}: {audio_file}"
-                char_start, char_end = spans[sentence_idx]
+                span_start, span_end = spans[sentence_idx]
+                char_start = index_map[span_start] - lead
+                char_end = index_map[span_end] - lead
+                # Stripping the tags can expose whitespace at either edge; the
+                # fragment's own text is stripped, so the span must be too.
+                while char_start < char_end and chapter_text[char_start].isspace():
+                    char_start += 1
+                while char_end > char_start and chapter_text[char_end - 1].isspace():
+                    char_end -= 1
+                # The invariant the sidecar exists for. Checking it here rather than
+                # trusting the arithmetic is the difference between a bad offset
+                # failing the build and a bad offset drifting the highlight.
+                expected = _normalised_text(sentence)
+                if chapter_text[char_start:char_end] != expected:
+                    return False, (
+                        f"block {i} sentence {sentence_idx}: offsets "
+                        f"[{char_start},{char_end}) slice "
+                        f"{chapter_text[char_start:char_end]!r}, expected {expected!r}"
+                    )
                 pending.append((audio_file, str(sentence), char_start, char_end, href))
             if len(pending) == first_fragment:
                 continue
+            normalised_chapters[chapter_index] = {'href': href, 'text': chapter_text}
 
             chapters.append({
                 'index': chapter_index,
@@ -149,7 +213,6 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
                 'firstFragment': first_fragment,
                 'lastFragment': len(pending) - 1,
             })
-            chapter_source_block[chapter_index] = i
             chapter_index += 1
 
         if not pending or not chapters:
@@ -241,26 +304,30 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
             'fragments': fragments,
         }
 
+        # fragments[].src indexes into each chapter's NORMALISED text, and the reader
+        # has no other way to obtain that string — the EPUB it renders holds source
+        # text, not this. contracts/schemas/normalised-text.schema.json freezes the
+        # companion document; buildId ties the pair together, because offsets are
+        # only valid against the normalisation that produced them.
+        normalised_document = {
+            'schemaVersion': sync_map_schema_version,
+            'bookId': book_id,
+            'buildId': build_id,
+            'chapters': {
+                chapter['id']: normalised_chapters[chapter['index']]
+                for chapter in chapters
+            },
+        }
+
+        # Sidecar first: a sync map on disk without its companion is a build whose
+        # offsets nothing can resolve, so the pair is written or neither is.
+        normalised_path = str(sync_map_path).replace('.sync-map.json', '.normalised-text.json')
+        with open(normalised_path, 'w', encoding='utf-8') as handle:
+            json.dump(normalised_document, handle, ensure_ascii=False, indent=2)
         with open(sync_map_path, 'w', encoding='utf-8') as handle:
             json.dump(document, handle, ensure_ascii=False, indent=2)
         print(f'Sync map written: {sync_map_path} ({len(fragments)} fragments, {len(chapters)} chapter(s))')
-
-        # fragments[].src indexes into each chapter's NORMALISED text, and the
-        # reader has no other way to obtain that string — the EPUB it renders holds
-        # the source text, not this. Ship it beside the sync map so the offsets are
-        # resolvable; the schema sets additionalProperties:false, so it cannot live
-        # inside the document itself.
-        try:
-            normalised_path = str(sync_map_path).replace('.sync-map.json', '.normalised-text.json')
-            payload = {}
-            for chapter in chapters:
-                block = blocks[chapter_source_block[chapter['index']]]
-                payload[chapter['id']] = {'href': chapter['href'], 'text': block['text']}
-            with open(normalised_path, 'w', encoding='utf-8') as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-            print(f'Normalised chapter text written: {normalised_path}')
-        except Exception as e:
-            print(f'build_sync_map_file(): normalised text sidecar not written: {e}')
+        print(f'Normalised chapter text written: {normalised_path}')
         return True, None
     except Exception as e:
         return False, f'build_sync_map_file(): {e}'
