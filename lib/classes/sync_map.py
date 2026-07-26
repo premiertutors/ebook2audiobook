@@ -80,14 +80,17 @@ def _normalise_with_map(source: str) -> tuple[str, list[int]]:
 def _slug(value: str) -> str:
     text = str(value)
     slug = re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')
-    if slug:
+    # Any non-ASCII letter/digit (CJK, Arabic, Cyrillic, ...) is dropped by the
+    # substitution above and carries no representation in `slug`. Titles that
+    # differ only in that dropped script — e.g. "中文1" and "Книга 1" both
+    # slugging to "1" — would otherwise collide in any consumer keyed by
+    # bookId, so fold a stable hash of the original value into the id whenever
+    # slugging lost that information, not just when it emptied out entirely.
+    lossy = any(ch.isalnum() and ord(ch) > 127 for ch in text)
+    if slug and not lossy:
         return slug
-    # Scripts with no ASCII letters/digits (CJK, Arabic, Cyrillic, ...) would
-    # otherwise all collapse to the same 'book' placeholder, colliding in any
-    # consumer keyed by bookId. A stable hash of the original value keeps them
-    # distinct while still producing an id restricted to [a-z0-9-].
     digest = hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]
-    return f'book-{digest}'
+    return f'{slug}-{digest}' if slug else f'book-{digest}'
 
 
 def _sha256_file(path: str) -> str | None:
