@@ -66,7 +66,7 @@ class OmniVoiceEngine(TTSUtils, TTSRegistry, name="omnivoice"):
             if engine is None:
                 dtype = (
                     torch.float16
-                    if self.device in ("cuda", "xpu")
+                    if self.device in ("cuda", "mps", "xpu")
                     else torch.float32
                 )
                 engine = OmniVoice.from_pretrained(

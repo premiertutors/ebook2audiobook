@@ -124,6 +124,8 @@ class TTSUtils:
         if hasattr(torch, 'xpu') and torch.xpu.is_available():
             torch.xpu.synchronize()
             torch.xpu.empty_cache()
+        if hasattr(torch, 'mps') and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
     def _try_dml(self, engine:Any, checkpoint_path:str)->None:
         try:
