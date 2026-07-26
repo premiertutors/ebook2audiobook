@@ -2572,11 +2572,26 @@ def normalize_sml_tags(text:str)->tuple[bool, str]:
 def escape_sml(text:str)->tuple[str, list[str]]:
     sml_blocks:list[str] = []
 
-    def _replace(m:re.Match[str])->str:
-        sml_blocks.append(m.group(0))
+    def _escape(s:str)->str:
+        sml_blocks.append(s)
         return chr(sml_escape_tag + len(sml_blocks) - 1)
 
-    return SML_TAG_PATTERN.sub(_replace, text), sml_blocks
+    # Every downstream consumer treats ord(c) >= sml_escape_tag as "this is an
+    # escaped/protected unit". A source character that already lives in that
+    # range (private-use-area glyphs from some EPUB font subsets) would collide
+    # with a tag placeholder and be corrupted by restore_sml()'s replace-by-
+    # codepoint, so it must be escaped into sml_blocks too, not just SML tags.
+    out:list[str] = []
+    last = 0
+    for m in SML_TAG_PATTERN.finditer(text):
+        start, end = m.span()
+        for c in text[last:start]:
+            out.append(_escape(c) if ord(c) >= sml_escape_tag else c)
+        out.append(_escape(m.group(0)))
+        last = end
+    for c in text[last:]:
+        out.append(_escape(c) if ord(c) >= sml_escape_tag else c)
+    return ''.join(out), sml_blocks
 
 def restore_sml(text:str, sml_blocks:list[str])->str:
     for i, block in enumerate(sml_blocks):
@@ -3211,6 +3226,17 @@ def combine_audio_chapters(session_id:str)->list[str]|None:
                 error = f'{Path(final_file).name} is corrupted or does not exist'
                 print(error)
                 return False
+            sync_map_path = os.path.join(session['audiobooks_dir'], f'{Path(final_file).stem}.sync-map.json')
+            normalised_text_path = sync_map_path.replace('.sync-map.json', '.normalised-text.json')
+            # A stale pair from a previous build of this same stem must not survive
+            # a failed regeneration, or a reconversion with sync maps disabled: the
+            # audio above was just overwritten, so a leftover sync map would
+            # describe the wrong timings/offsets for it. Clear it now, right after
+            # the audio is confirmed replaced, so a later VTT/sync-map failure
+            # can't leave the stale pair behind.
+            for stale_path in (sync_map_path, normalised_text_path):
+                if os.path.exists(stale_path):
+                    os.unlink(stale_path)
             if session['output_format'] in ['mp3', 'm4a', 'm4b', 'mp4'] and session['cover'] is not None:
                 cover_path = session['cover']
                 msg = f'Adding cover {cover_path} into the final audiobook file…'
@@ -3240,15 +3266,6 @@ def combine_audio_chapters(session_id:str)->list[str]|None:
                 error = f'build_vtt_file() error: {error}'
                 print(error)
                 return False
-            sync_map_path = os.path.join(session['audiobooks_dir'], f'{Path(final_file).stem}.sync-map.json')
-            normalised_text_path = sync_map_path.replace('.sync-map.json', '.normalised-text.json')
-            # A stale pair from a previous build of this same stem must not survive
-            # a failed regeneration, or a reconversion with sync maps disabled: the
-            # audio/VTT above were just overwritten, so a leftover sync map would
-            # describe the wrong timings/offsets for them.
-            for stale_path in (sync_map_path, normalised_text_path):
-                if os.path.exists(stale_path):
-                    os.unlink(stale_path)
             if emit_sync_map:
                 sync_built, sync_error = build_sync_map_file(
                     session,
