@@ -187,8 +187,8 @@ jobs:
       - name: Create Audiobook Output folders for Artifacts
         shell: bash
         run: |
-          mkdir -p ~/ebook2audiobook/audiobooks/{TACOTRON,FAIRSEQ,UnFAIRSEQ,VITS,PIPER,YOURTTS,XTTS,XTTSFineTune,XTTSFineTuneCustom,BARK,TORTOISE,GLOWTTS}
-          find ~/ebook2audiobook/audiobooks/{TACOTRON,FAIRSEQ,UnFAIRSEQ,VITS,PIPER,YOURTTS,XTTS,XTTSFineTune,XTTSFineTuneCustom,BARK,TORTOISE,GLOWTTS} -mindepth 1 -exec rm -rf {} +
+          mkdir -p ~/ebook2audiobook/audiobooks/{TACOTRON,FAIRSEQ,UnFAIRSEQ,VITS,PIPER,YOURTTS,XTTS,XTTSFineTune,XTTSFineTuneCustom,BARK,TORTOISE,GLOWTTS,OMNIVOICE}
+          find ~/ebook2audiobook/audiobooks/{TACOTRON,FAIRSEQ,UnFAIRSEQ,VITS,PIPER,YOURTTS,XTTS,XTTSFineTune,XTTSFineTuneCustom,BARK,TORTOISE,GLOWTTS,OMNIVOICE} -mindepth 1 -exec rm -rf {} +
 
       # This step only runs on non-windows because we don't need to modify the .command file if we are running .cmd
       - name: Add set -e at beginning of ebook2audiobook.command (for error passing)
@@ -341,6 +341,14 @@ jobs:
           if [ "$IS_WINDOWS" != "true" ]; then conda deactivate 2>/dev/null || true; fi
 
           $RUN_CMD --headless --language eng --ebook "tools/workflow-testing/test1.txt" --tts_engine BARK --voice "voices/eng/elder/male/DavidAttenborough.wav" --output_dir ~/ebook2audiobook/audiobooks/BARK 
+
+      - name: English OmniVoice Custom-Voice headless single test
+        shell: bash
+        run: |
+          cd ~/ebook2audiobook
+          if [ "$IS_WINDOWS" != "true" ]; then conda deactivate 2>/dev/null || true; fi
+
+          $RUN_CMD --headless --language eng --ebook "tools/workflow-testing/test1.txt" --tts_engine OMNIVOICE --voice "voices/eng/elder/male/DavidAttenborough.wav" --output_dir ~/ebook2audiobook/audiobooks/OMNIVOICE
 
       - name: Upload audiobooks folder artifact
         if: always()
