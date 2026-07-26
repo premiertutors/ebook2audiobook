@@ -156,6 +156,18 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
         fragments: list[dict] = []
         pending: list[tuple[Path, str, int, int, str]] = []  # file, text, charStart, charEnd, href
 
+        # Chapter ids must stay stable across split output parts: build_sync_map_file
+        # is called once per part with a disjoint block_indices subset, so a counter
+        # local to this call would renumber every chapter from ch0 in each part and
+        # change ids whenever the split boundary moves. Numbering against the full,
+        # unfiltered block list instead ties each id to the block's own identity.
+        global_chapter_index: dict[int, int] = {}
+        gci = 0
+        for gi, gblock in enumerate(blocks):
+            if gblock['keep'] and gblock['text'].strip():
+                global_chapter_index[gi] = gci
+                gci += 1
+
         chapter_index = 0
         for i, block in enumerate(blocks):
             if not (block['keep'] and block['text'].strip()):
@@ -240,7 +252,7 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
 
             chapters.append({
                 'index': chapter_index,
-                'id': f'ch{chapter_index}',
+                'id': f'ch{global_chapter_index[i]}',
                 'title': str(source.get('title') or ''),
                 'href': href,
                 'startMs': 0,
@@ -354,13 +366,25 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
             },
         }
 
-        # Sidecar first: a sync map on disk without its companion is a build whose
-        # offsets nothing can resolve, so the pair is written or neither is.
+        # A sync map on disk without its companion is a build whose offsets nothing
+        # can resolve, so the pair is written or neither is: both documents go to
+        # temporary files first and are only renamed into place once both writes
+        # succeed, so a mid-write failure (e.g. disk full) can't leave a truncated
+        # or mismatched sidecar behind.
         normalised_path = str(sync_map_path).replace('.sync-map.json', '.normalised-text.json')
-        with open(normalised_path, 'w', encoding='utf-8') as handle:
-            json.dump(normalised_document, handle, ensure_ascii=False, indent=2)
-        with open(sync_map_path, 'w', encoding='utf-8') as handle:
-            json.dump(document, handle, ensure_ascii=False, indent=2)
+        normalised_tmp = normalised_path + '.tmp'
+        sync_map_tmp = str(sync_map_path) + '.tmp'
+        try:
+            with open(normalised_tmp, 'w', encoding='utf-8') as handle:
+                json.dump(normalised_document, handle, ensure_ascii=False, indent=2)
+            with open(sync_map_tmp, 'w', encoding='utf-8') as handle:
+                json.dump(document, handle, ensure_ascii=False, indent=2)
+            os.replace(normalised_tmp, normalised_path)
+            os.replace(sync_map_tmp, sync_map_path)
+        finally:
+            for tmp_path in (normalised_tmp, sync_map_tmp):
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
         print(f'Sync map written: {sync_map_path} ({len(fragments)} fragments, {len(chapters)} chapter(s))')
         print(f'Normalised chapter text written: {normalised_path}')
         return True, None

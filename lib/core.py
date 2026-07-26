@@ -3240,15 +3240,16 @@ def combine_audio_chapters(session_id:str)->list[str]|None:
                 error = f'build_vtt_file() error: {error}'
                 print(error)
                 return False
+            sync_map_path = os.path.join(session['audiobooks_dir'], f'{Path(final_file).stem}.sync-map.json')
+            normalised_text_path = sync_map_path.replace('.sync-map.json', '.normalised-text.json')
+            # A stale pair from a previous build of this same stem must not survive
+            # a failed regeneration, or a reconversion with sync maps disabled: the
+            # audio/VTT above were just overwritten, so a leftover sync map would
+            # describe the wrong timings/offsets for them.
+            for stale_path in (sync_map_path, normalised_text_path):
+                if os.path.exists(stale_path):
+                    os.unlink(stale_path)
             if emit_sync_map:
-                sync_map_path = os.path.join(session['audiobooks_dir'], f'{Path(final_file).stem}.sync-map.json')
-                normalised_text_path = sync_map_path.replace('.sync-map.json', '.normalised-text.json')
-                # A stale pair from a previous build of this same stem must not survive
-                # a failed regeneration: the audio/VTT above were just overwritten, so a
-                # leftover sync map would describe the wrong timings/offsets for them.
-                for stale_path in (sync_map_path, normalised_text_path):
-                    if os.path.exists(stale_path):
-                        os.unlink(stale_path)
                 sync_built, sync_error = build_sync_map_file(
                     session,
                     sync_map_path=sync_map_path,
