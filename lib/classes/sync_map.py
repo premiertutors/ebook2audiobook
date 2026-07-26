@@ -23,6 +23,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,7 +102,12 @@ def _sha256_file(path: str) -> str | None:
 
 
 def _audio_stream_info(final_file: str) -> tuple[int, int]:
-    """(sampleRate, channels) of the exported audiobook, with sane fallbacks."""
+    """(sampleRate, channels) of the exported audiobook, with sane fallbacks.
+
+    Mutagen cannot read stream properties for every container (notably
+    Matroska/WebM), so ffprobe is tried next before falling back to the
+    hardcoded default.
+    """
     try:
         from mutagen import File as MutagenFile
         info = getattr(MutagenFile(final_file), 'info', None)
@@ -108,6 +115,23 @@ def _audio_stream_info(final_file: str) -> tuple[int, int]:
         channels = int(getattr(info, 'channels', 0) or 0)
         if rate >= 8000 and channels in (1, 2):
             return rate, channels
+    except Exception:
+        pass
+    try:
+        ffprobe = shutil.which('ffprobe')
+        if ffprobe:
+            probe = subprocess.run(
+                [ffprobe, '-v', 'error', '-select_streams', 'a:0',
+                 '-show_entries', 'stream=sample_rate,channels',
+                 '-of', 'default=nokey=1:noprint_wrappers=1', final_file],
+                capture_output=True, text=True,
+            )
+            if probe.returncode == 0:
+                values = probe.stdout.split()
+                if len(values) >= 2:
+                    rate, channels = int(values[0]), int(values[1])
+                    if rate >= 8000 and channels in (1, 2):
+                        return rate, channels
     except Exception:
         pass
     return 24000, 1
@@ -191,8 +215,8 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
                 # whitespace, or both) maps to a position at or before `lead`; that
                 # is the start of the stripped chapter_text, i.e. offset 0 — not a
                 # negative index, which Python would silently wrap from the end.
-                char_start = max(0, index_map[span_start] - lead)
-                char_end = max(0, index_map[span_end] - lead)
+                char_start = max(0, min(len(chapter_text), index_map[span_start] - lead))
+                char_end = max(0, min(len(chapter_text), index_map[span_end] - lead))
                 # Stripping the tags can expose whitespace at either edge; the
                 # fragment's own text is stripped, so the span must be too.
                 while char_start < char_end and chapter_text[char_start].isspace():

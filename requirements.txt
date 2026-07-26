@@ -46,6 +46,7 @@ pypinyin
 pythainlp
 pykakasi
 mutagen
+pysbd
 PyOpenGL
 phonemizer-fork
 num2words2

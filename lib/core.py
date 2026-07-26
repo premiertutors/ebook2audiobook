@@ -1947,7 +1947,8 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
                 for i, c in enumerate(text):
                     esc2orig[i] = cursor
                     o = ord(c)
-                    cursor += len(sml_blocks[o - sml_escape_tag]) if o >= sml_escape_tag else 1
+                    cursor += (len(sml_blocks[o - sml_escape_tag])
+                               if sml_escape_tag <= o < sml_escape_tag + len(sml_blocks) else 1)
                 esc2orig[len(text)] = cursor
                 fragments = [restore_sml(text[a:b], sml_blocks) for a, b in spans]
                 if with_spans:
