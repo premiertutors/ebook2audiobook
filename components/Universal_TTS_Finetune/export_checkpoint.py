@@ -14,121 +14,127 @@ from utils.omnivoice_utils import (
     package_omnivoice_checkpoint,
 )
 
-def main():
+
+def main()->None:
     if len(sys.argv) < 2:
-        print("Usage: python export_checkpoint.py <run_dir_path>")
+        print('Usage: python export_checkpoint.py <run_dir_path>')
         sys.exit(1)
-        
+
     run_dir = Path(sys.argv[1]).resolve()
     if not run_dir.exists():
-        print(f"Error: Run directory {run_dir} does not exist.")
+        print(f'Error: Run directory {run_dir} does not exist.')
         sys.exit(1)
-        
+
     # Check what kind of files are inside to auto-detect model type
     # Piper uses Lightning (.ckpt), Coqui uses standard PyTorch (.pth)
-    has_ckpt = list(run_dir.glob("**/*.ckpt")) or list(run_dir.glob("*.ckpt"))
-    has_pth = list(run_dir.glob("**/*.pth")) or list(run_dir.glob("*.pth"))
-    has_safetensors = list(run_dir.glob("**/model.safetensors"))
-    
+    has_ckpt = list(run_dir.glob('**/*.ckpt')) or list(run_dir.glob('*.ckpt'))
+    has_pth = list(run_dir.glob('**/*.pth')) or list(run_dir.glob('*.pth'))
+    has_safetensors = list(run_dir.glob('**/model.safetensors'))
+
     # Try to infer model key from folder name: training_runs/<model_key>/<timestamp>
     model_key = run_dir.parent.name
-    
-    if model_key == "omnivoice" or has_safetensors:
-        print("Detected model family: OmniVoice (Hugging Face format)")
+
+    if model_key == 'omnivoice' or has_safetensors:
+        print('Detected model family: OmniVoice (Hugging Face format)')
         try:
             checkpoint_dir = find_omnivoice_checkpoint(run_dir)
-            ready_dir = run_dir / "ready"
+            ready_dir = run_dir / 'ready'
             ready_dir.mkdir(parents=True, exist_ok=True)
             ready_model = package_omnivoice_checkpoint(checkpoint_dir, ready_dir)
-            reference_wav = ready_dir / "reference.wav"
+            reference_wav = ready_dir / 'reference.wav'
             artifacts = {
-                "model_key": "omnivoice",
-                "model_label": "OmniVoice",
-                "family": "omnivoice",
-                "training_root": str(run_dir),
-                "dataset_dir": "",
-                "checkpoint": str(ready_model),
-                "config": str(ready_model / "config.json"),
-                "reference_wav": str(reference_wav) if reference_wav.exists() else "",
-                "log_path": str(run_dir / "training.log")
-                if (run_dir / "training.log").exists()
-                else "",
-                "unused_overrides": {},
+                'model_key': 'omnivoice',
+                'model_label': 'OmniVoice',
+                'family': 'omnivoice',
+                'training_root': str(run_dir),
+                'dataset_dir': '',
+                'checkpoint': str(ready_model),
+                'config': str(ready_model / 'config.json'),
+                'reference_wav': str(reference_wav) if reference_wav.exists() else '',
+                'log_path': str(run_dir / 'training.log')
+                if (run_dir / 'training.log').exists()
+                else '',
+                'unused_overrides': {},
             }
-            artifacts_path = ready_dir / "artifacts.json"
-            artifacts_path.write_text(
-                json.dumps(artifacts, indent=2), encoding="utf-8"
+            artifacts_path = ready_dir / 'artifacts.json'
+            artifacts_path.write_text(json.dumps(artifacts, indent=2), encoding='utf-8')
+            print(
+                'Successfully packaged OmniVoice checkpoint and wrote artifacts.json!'
             )
-            print("Successfully packaged OmniVoice checkpoint and wrote artifacts.json!")
         except Exception as e:
-            print(f"Error finalizing OmniVoice artifacts: {e}")
+            print(f'Error finalizing OmniVoice artifacts: {e}')
             sys.exit(1)
 
-    elif has_ckpt and (not has_pth or model_key == "piper"):
-        print("Detected model family: Piper (ONNX format)")
-        
-        preprocessed_dir = run_dir / "preprocessed"
-        config_path = preprocessed_dir / "config.json"
+    elif has_ckpt and (not has_pth or model_key == 'piper'):
+        print('Detected model family: Piper (ONNX format)')
+
+        preprocessed_dir = run_dir / 'preprocessed'
+        config_path = preprocessed_dir / 'config.json'
         if not config_path.exists():
-            print(f"Error: config.json not found under {preprocessed_dir}")
+            print(f'Error: config.json not found under {preprocessed_dir}')
             sys.exit(1)
-            
-        lightning_logs_dir = preprocessed_dir / "lightning_logs"
-        trained_ckpt = _latest_matching_file(lightning_logs_dir, ["**/*.ckpt", "*.ckpt"])
+
+        lightning_logs_dir = preprocessed_dir / 'lightning_logs'
+        trained_ckpt = _latest_matching_file(
+            lightning_logs_dir, ['**/*.ckpt', '*.ckpt']
+        )
         if not trained_ckpt:
-            trained_ckpt = _latest_matching_file(run_dir, ["**/*.ckpt", "*.ckpt"])
-            
+            trained_ckpt = _latest_matching_file(run_dir, ['**/*.ckpt', '*.ckpt'])
+
         if not trained_ckpt:
-            print(f"Error: No .ckpt file found in {run_dir}")
+            print(f'Error: No .ckpt file found in {run_dir}')
             sys.exit(1)
-            
-        print(f"Using checkpoint: {trained_ckpt}")
-        
-        ready_dir = run_dir / "ready"
+
+        print(f'Using checkpoint: {trained_ckpt}')
+
+        ready_dir = run_dir / 'ready'
         ready_dir.mkdir(parents=True, exist_ok=True)
-        ready_onnx = ready_dir / "model.onnx"
-        
-        print("Exporting to ONNX...")
+        ready_onnx = ready_dir / 'model.onnx'
+
+        print('Exporting to ONNX...')
         export_piper_onnx(trained_ckpt, ready_onnx, config_path)
-        
-        log_path = run_dir / "training.log"
+
+        log_path = run_dir / 'training.log'
         artifacts = {
-            "model_key": "piper",
-            "model_label": "Piper TTS",
-            "family": "piper",
-            "training_root": str(run_dir),
-            "dataset_dir": "",
-            "checkpoint": str(ready_onnx),
-            "config": str(ready_onnx) + ".json",
-            "reference_wav": "",
-            "log_path": str(log_path) if log_path.exists() else "",
-            "unused_overrides": {},
+            'model_key': 'piper',
+            'model_label': 'Piper TTS',
+            'family': 'piper',
+            'training_root': str(run_dir),
+            'dataset_dir': '',
+            'checkpoint': str(ready_onnx),
+            'config': str(ready_onnx) + '.json',
+            'reference_wav': '',
+            'log_path': str(log_path) if log_path.exists() else '',
+            'unused_overrides': {},
         }
-        
-        artifacts_path = ready_dir / "artifacts.json"
-        artifacts_path.write_text(json.dumps(artifacts, indent=2), encoding="utf-8")
-        print("Successfully exported model and wrote artifacts.json!")
-        
+
+        artifacts_path = ready_dir / 'artifacts.json'
+        artifacts_path.write_text(json.dumps(artifacts, indent=2), encoding='utf-8')
+        print('Successfully exported model and wrote artifacts.json!')
+
     elif has_pth:
-        print(f"Detected model family: Coqui PTH (Model key inferred: {model_key})")
-        
+        print(f'Detected model family: Coqui PTH (Model key inferred: {model_key})')
+
         # Use pipeline's built-in finalizer for Coqui models (which handles XTTS optimizations too)
         try:
             artifacts = _finalize_training_artifacts(
                 spec_key=model_key,
                 training_root=run_dir,
-                dataset_dir=Path(""),
-                reference_wav=""
+                dataset_dir=Path(''),
+                reference_wav='',
             )
-            print("Successfully packaged Coqui checkpoint and wrote artifacts.json!")
+            print('Successfully packaged Coqui checkpoint and wrote artifacts.json!')
         except Exception as e:
-            print(f"Error finalizing Coqui artifacts: {e}")
+            print(f'Error finalizing Coqui artifacts: {e}')
             sys.exit(1)
     else:
-        print("Error: Could not find any .ckpt or .pth files to export.")
+        print('Error: Could not find any .ckpt or .pth files to export.')
         sys.exit(1)
-        
-    print(f"You can now test this model in the GUI or via: python headless_cli.py synthesize --artifacts {run_dir}/ready --text '...' --model {model_key}")
 
-if __name__ == "__main__":
+    print(
+        f"You can now test this model in the GUI or via: python headless_cli.py synthesize --artifacts {run_dir}/ready --text '...' --model {model_key}"
+    )
+
+
+if __name__ == '__main__':
     main()
