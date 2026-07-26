@@ -104,6 +104,22 @@ def _sha256_file(path: str) -> str | None:
         return None
 
 
+def _resolve_voice_path(session: dict, block_voice: str | None) -> str | None:
+    """The voice file actually used for a block: its own override, else the
+    session default, else the fine-tuned preset's voice — the same fallback
+    chain ``convert_chapters2audio`` applies when it synthesises the block."""
+    voice_path = block_voice or session.get('voice')
+    if not voice_path:
+        try:
+            from lib.classes.tts_engines.common.preset_loader import load_engine_presets
+            voice_path = (load_engine_presets(session['tts_engine'])
+                          .get(session['fine_tuned'], {})
+                          .get('voice'))
+        except Exception:
+            voice_path = None
+    return voice_path
+
+
 def _audio_stream_info(final_file: str) -> tuple[int, int]:
     """(sampleRate, channels) of the exported audiobook, with sane fallbacks.
 
@@ -158,6 +174,7 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
         normalised_chapters: dict[int, dict] = {}
         fragments: list[dict] = []
         pending: list[tuple[Path, str, int, int, str]] = []  # file, text, charStart, charEnd, href
+        used_voice_paths: set = set()
 
         # Chapter ids must stay stable across split output parts: build_sync_map_file
         # is called once per part with a disjoint block_indices subset, so a counter
@@ -251,6 +268,7 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
                 pending.append((audio_file, str(sentence), char_start, char_end, href))
             if len(pending) == first_fragment:
                 continue
+            used_voice_paths.add(_resolve_voice_path(session, block.get('voice')))
             normalised_chapters[chapter_index] = {'href': href, 'text': chapter_text}
 
             chapters.append({
@@ -308,25 +326,31 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
             chapter['endMs'] = fragments[chapter['lastFragment']]['endMs']
 
         sample_rate, channels = _audio_stream_info(final_file)
-        voice_path = session.get('voice')
-        if not voice_path:
-            try:
-                from lib.classes.tts_engines.common.preset_loader import load_engine_presets
-                voice_path = (load_engine_presets(session['tts_engine'])
-                              .get(session['fine_tuned'], {})
-                              .get('voice'))
-            except Exception:
-                voice_path = None
+        voice_path = _resolve_voice_path(session, None)
 
         engine = {
             'name': str(session['tts_engine']),
             'version': str(prog_version),
         }
-        voice_hash = _sha256_file(voice_path) if voice_path else None
-        if voice_hash:
-            engine['voiceHash'] = voice_hash
+        # engine.voiceHash identifies the voice(s) actually used by the included
+        # blocks, not just the session default — a block-level override (or a
+        # mix of them) must not be reported as the session voice.
+        voice_paths = sorted({vp for vp in used_voice_paths if vp})
+        if len(voice_paths) == 1:
+            voice_hash = _sha256_file(voice_paths[0])
+            if voice_hash:
+                engine['voiceHash'] = voice_hash
+        elif len(voice_paths) > 1:
+            per_voice_hashes = [h for h in (_sha256_file(vp) for vp in voice_paths) if h]
+            if per_voice_hashes:
+                engine['voiceHash'] = 'sha256:' + hashlib.sha256(
+                    '|'.join(per_voice_hashes).encode('utf-8')
+                ).hexdigest()
 
-        book_id = _slug(session.get('filename_noext') or Path(final_file).stem)
+        book_stem = session.get('filename_noext') or Path(final_file).stem
+        if session.get('translate_enabled') and session.get('translate'):
+            book_stem = f"{book_stem}_{session['translate']}"
+        book_id = _slug(book_stem)
         voice_label = _slug(Path(voice_path).stem) if voice_path else _slug(str(session['fine_tuned']))
         build_id = '__'.join([
             datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M-%SZ'),

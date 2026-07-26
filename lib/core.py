@@ -1855,11 +1855,15 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
         return bool(s) and all(ord(c) >= sml_escape_tag for c in s)
 
     def _strip_leading_noise(s:str)->str:
+        # Inverted marks (¿¡) and opening quotes/brackets (Unicode categories Ps/Pi)
+        # are valid sentence-opening punctuation, not extraction noise — stop there
+        # instead of stripping them, so e.g. Spanish "¿Cómo estás?" keeps its ¿.
         i = 0
         n = len(s)
         while i < n:
             c = s[i]
-            if c.isalnum() or c == '_' or c.isspace() or ord(c) >= sml_escape_tag:
+            if (c.isalnum() or c == '_' or c.isspace() or ord(c) >= sml_escape_tag
+                    or c in '¿¡' or unicodedata.category(c) in ('Ps', 'Pi')):
                 break
             i += 1
         return s[i:].lstrip()
