@@ -3018,7 +3018,13 @@ def convert_chapters2audio(session_id:str)->bool:
                             continue
                         show_alert(session_id, {'type': 'warning', 'msg': f'Block {x} has {len(missing_sentences)} missing audio files, reconverting…'})
                         _reset_chapter_file(block_id)
-                elif block_changed and x <= block_resume:
+                elif block_changed:
+                    # Position relative to block_resume says nothing about
+                    # whether stale audio exists: realignment can move an id
+                    # that was already rendered to an index past the resume
+                    # pointer. The parallel lane reconciles by file existence,
+                    # so a changed block must be purged wherever it sits, or
+                    # its old sentence files would be reused verbatim.
                     show_alert(session_id, {'type': 'info', 'msg': f'Chapter {ch_num} (block {x}) — changed, reconverting'})
                     _reset_chapter_file(block_id)
                 elif x == block_resume and not block_changed:

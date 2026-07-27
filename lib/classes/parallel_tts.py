@@ -90,10 +90,12 @@ class ParallelSentencePool:
         """Render `tasks` = [(sentence_file, sentence, block_voice)] concurrently.
 
         Calls on_done(sentence_file) as each finishes (progress display).
-        Returns (True, None) or (False, error) on the first failure; remaining
-        futures are cancelled, already-written files are kept for resume.
+        Returns (True, None) or (False, error) on the first failure; queued
+        futures are cancelled and the already-running ones are drained before
+        returning, so no worker is still writing sentence files once the caller
+        sees the failure. Files written by then are kept for resume.
         """
-        from concurrent.futures import as_completed
+        from concurrent.futures import as_completed, wait
 
         futures = {
             self.executor.submit(_convert_one, f, s, v): f for (f, s, v) in tasks
@@ -105,6 +107,10 @@ class ParallelSentencePool:
                 error = err if not ok else "Conversion Cancelled"
                 for pending in futures:
                     pending.cancel()
+                # cancel() is a no-op for a task already running; wait() lets
+                # those finish (one sentence each) so a retry cannot race a
+                # surviving worker on the same paths.
+                wait(futures)
                 break
             on_done(futures[future])
         if error:
@@ -112,4 +118,7 @@ class ParallelSentencePool:
         return True, None
 
     def shutdown(self) -> None:
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        # wait=True so the pool is fully torn down before the conversion call
+        # reports completion; convert_block has already drained, so this only
+        # costs anything on the exception path.
+        self.executor.shutdown(wait=True, cancel_futures=True)
