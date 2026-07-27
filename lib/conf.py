@@ -134,6 +134,20 @@ components_dir = os.path.abspath('components')
 tempfile.tempdir = run_dir
 
 # ---------------------------------------------------------------------
+# Read-along fork additions (premiertutors/books)
+# ---------------------------------------------------------------------
+# Upstream packs text into character-budget fragments and then MERGES any
+# fragment under max_chars/2 into its neighbour, which yields ~13 s highlight
+# units. For read-along a fragment must be exactly one sentence, so we split on
+# real sentence boundaries (pysbd) and never merge. A sentence longer than the
+# engine's character limit is still sub-split — that is the only case where a
+# fragment is smaller than a sentence.
+sentence_granularity = os.getenv('E2A_SENTENCE_GRANULARITY', '1').lower() not in ('0', 'false', 'no')
+# Emit <audiobook>.sync-map.json next to the .vtt.
+emit_sync_map = os.getenv('E2A_SYNC_MAP', '1').lower() not in ('0', 'false', 'no')
+sync_map_schema_version = '1.0.0'
+
+# ---------------------------------------------------------------------
 # Environment setup
 # ---------------------------------------------------------------------
 os.environ['PYTHONUTF8'] = '1'

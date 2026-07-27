@@ -49,6 +49,7 @@ from lib.classes.argos_translator import ArgosTranslator
 from lib.classes.tts_manager import TTSManager
 from lib.classes.tts_engines.common.audio import get_audiolist_duration, get_audio_duration
 from lib.classes.tts_engines.common.utils import build_vtt_file
+from lib.classes.sync_map import build_sync_map_file
 
 from lib import *
 
@@ -234,6 +235,7 @@ class SessionContext:
             "filename_noext": None,
             "cover": None,
             "blocks_orig": {},
+            "block_sources": [],
             "blocks_saved": {},
             "blocks_current": {},
             "blocks_orig_json": None,
@@ -1226,12 +1228,31 @@ INTO A NEW TRAINING MODEL. YOU CAN IMPROVE IT OR ASK TO A TRAINING MODEL EXPERT.
             if session['cancellation_requested']:
                 return []
             # Step 1: Extract TOC (Table of Contents)
+            toc_list = []
+            # href -> title, for the sync map's chapters[].title. TOC entries do not
+            # correspond 1:1 with spine documents, so they are matched by href;
+            # positional matching silently mislabels chapters.
+            toc_titles = {}
             try:
                 toc = epubBook.toc
                 toc_list = [
                         nt for item in toc if hasattr(item, 'title')
                         if (nt := normalize_text(str(item.title), session['language'], session['language_iso1'], session['tts_engine'])) is not None
                 ]
+                def _flatten_toc(entries):
+                    # EbookLib represents nested TOC levels as (Section/Link, children)
+                    # tuples, so a flat iteration only sees the top level.
+                    for entry in entries or []:
+                        if isinstance(entry, (tuple, list)):
+                            for sub in entry:
+                                yield from _flatten_toc(sub if isinstance(sub, (tuple, list)) else [sub])
+                        else:
+                            yield entry
+                for item in _flatten_toc(toc):
+                    href = str(getattr(item, 'href', '') or '').split('#', 1)[0]
+                    title = str(getattr(item, 'title', '') or '').strip()
+                    if href and title:
+                        toc_titles.setdefault(href, title)
             except Exception as toc_error:
                 error = f'Error extracting Table of Content: {toc_error}'
                 show_alert(session_id, {"type": "warning", "msg": error})
@@ -1288,6 +1309,10 @@ INTO A NEW TRAINING MODEL. YOU CAN IMPROVE IT OR ASK TO A TRAINING MODEL EXPERT.
                     return []
             is_num2words_compat = get_num2words_compat(session['language_iso1'])
             non_text_filter = NonTextFilter(sml_pattern=SML_TAG_PATTERN, lang=session['language'])
+            # Blocks are spine documents, one per chapter. The sync map needs each
+            # chapter's href and title, and nothing downstream carries them, so
+            # record them here in lockstep with blocks[].
+            block_sources = []
             try:
                 with zipfile.ZipFile(session['epub_path'], 'r') as zf:
                     zip_names = set(zf.namelist())
@@ -1299,7 +1324,13 @@ INTO A NEW TRAINING MODEL. YOU CAN IMPROVE IT OR ASK TO A TRAINING MODEL EXPERT.
                             show_alert(session_id, {"type": "warning", "msg": error})
                             return []
                         blocks.append(text)
+                        doc_href = str(getattr(doc, 'file_name', '') or f'spine-{doc_idx}')
+                        block_sources.append({
+                            'href': doc_href,
+                            'title': toc_titles.get(doc_href, toc_titles.get(os.path.basename(doc_href), ''))
+                        })
             finally:
+                session['block_sources'] = block_sources
                 if stanza_nlp:
                     import gc, torch
                     try:
@@ -1636,7 +1667,84 @@ def filter_blocks(session_id:str, idx:int, doc:EpubHtml, stanza_nlp:Pipeline, is
         DependencyError(error)
         return None
 
-def get_sentences(session_id:str, text:str)->list|None:
+_PYSBD_LANGUAGES = frozenset({
+    'am', 'ar', 'bg', 'da', 'de', 'el', 'en', 'es', 'fa', 'fr', 'hi', 'hy', 'it',
+    'ja', 'kk', 'mr', 'my', 'nl', 'pl', 'ru', 'sk', 'ur', 'zh'
+})
+_pysbd_segmenters:dict = {}
+
+def _sentence_spans(esc_text:str, lang_iso1:str, max_chars:int, clean_len, strip_escaped_sml,
+                    strip_leading_noise, force_split_segment)->list[tuple[int,int]]:
+    """[start, end) spans over the SML-escaped block text, one per sentence.
+
+    Sentences longer than the engine's character budget are sub-split; spans with
+    no alphanumeric content (bare punctuation, a lone [pause]) are folded into a
+    neighbour so the tag survives without becoming a fragment of its own.
+    """
+    import pysbd
+    segmenter = _pysbd_segmenters.get(lang_iso1)
+    if segmenter is None:
+        segmenter = pysbd.Segmenter(language=lang_iso1, clean=False, char_span=True)
+        _pysbd_segmenters[lang_iso1] = segmenter
+    spans:list[tuple[int,int]] = []
+    for sentence_span in segmenter.segment(esc_text):
+        start, end = sentence_span.start, sentence_span.end
+        while start < end and esc_text[start].isspace():
+            start += 1
+        while end > start and esc_text[end - 1].isspace():
+            end -= 1
+        if start >= end:
+            continue
+        piece = esc_text[start:end]
+        if clean_len(piece) <= max_chars:
+            spans.append((start, end))
+            continue
+        cursor = start
+        for part in force_split_segment(piece):
+            if not part:
+                continue
+            at = esc_text.find(part, cursor, end)
+            if at == -1:
+                continue
+            spans.append((at, at + len(part)))
+            cursor = at + len(part)
+    # Drop leading punctuation the same way the upstream path does, keeping the
+    # span aligned with the text we will actually synthesise.
+    trimmed:list[tuple[int,int]] = []
+    for start, end in spans:
+        raw = esc_text[start:end]
+        kept = strip_leading_noise(raw)
+        if not kept:
+            continue
+        trimmed.append((start + len(raw) - len(kept), end))
+    # Fold alnum-free spans into a neighbour: convert_chapters2audio and
+    # build_vtt_file both skip them, so a standalone one would be a fragment with
+    # no audio file and no timing.
+    folded:list[tuple[int,int]] = []
+    for start, end in trimmed:
+        if any(c.isalnum() for c in strip_escaped_sml(esc_text[start:end])):
+            folded.append((start, end))
+        elif folded:
+            folded[-1] = (folded[-1][0], end)
+        elif trimmed:
+            folded.append((start, end))
+    if folded and not any(c.isalnum() for c in strip_escaped_sml(esc_text[folded[0][0]:folded[0][1]])):
+        if len(folded) > 1:
+            folded[1] = (folded[0][0], folded[1][1])
+            folded.pop(0)
+        else:
+            return []
+    return folded
+
+def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|None:
+    """Split a block's normalised text into TTS fragments.
+
+    With ``sentence_granularity`` on (the read-along fork default) a fragment is
+    exactly one sentence — never two merged together — and ``with_spans`` also
+    returns each fragment's [charStart, charEnd) offsets into ``text``, which is
+    what feeds ``fragments[].src`` in the sync map. The function is deterministic,
+    so the emitter can recompute the spans for a run it did not observe.
+    """
 
     def _split_inclusive(text:str, pattern:re.Pattern[str])->list[str]:
         result = []
@@ -1747,11 +1855,17 @@ def get_sentences(session_id:str, text:str)->list|None:
         return bool(s) and all(ord(c) >= sml_escape_tag for c in s)
 
     def _strip_leading_noise(s:str)->str:
+        # Inverted marks (¿¡), straight quotes ("'), and opening quotes/brackets
+        # (Unicode categories Ps/Pi) are valid sentence-opening punctuation, not
+        # extraction noise — stop there instead of stripping them, so e.g. Spanish
+        # "¿Cómo estás?" keeps its ¿ and `"Hello."` keeps its opening ". Straight
+        # quotes are category Po (not Pi), so they need an explicit exception.
         i = 0
         n = len(s)
         while i < n:
             c = s[i]
-            if c.isalnum() or c == '_' or c.isspace() or ord(c) >= sml_escape_tag:
+            if (c.isalnum() or c == '_' or c.isspace() or ord(c) >= sml_escape_tag
+                    or c in '¿¡"\'' or unicodedata.category(c) in ('Ps', 'Pi')):
                 break
             i += 1
         return s[i:].lstrip()
@@ -1803,13 +1917,52 @@ def get_sentences(session_id:str, text:str)->list|None:
         if not session:
             return None
         lang = session['language']
+        lang_iso1 = session.get('language_iso1')
         if session.get('translate_enabled') and session.get('translate'):
             lang = session['translate']
+            lang_iso1 = session.get('translate_iso1')
         tts_engine = session['tts_engine']
         max_chars = int(language_mapping[lang]['max_chars'] / 2)
 
+        original_text = text
         text, sml_blocks = escape_sml(text)
         assert not SML_TAG_PATTERN.search(text)
+
+        # ---------------------------------------------------------------
+        # Read-along fork: one fragment == one sentence.
+        # ---------------------------------------------------------------
+        # Upstream's packer below is a character-budget filler that merges any
+        # fragment under max_chars/2 into a neighbour, so two or three sentences
+        # routinely share one audio clip and one highlight. pysbd gives real
+        # sentence boundaries WITH character spans, which is also the only source
+        # we have for fragments[].src offsets. A sentence over the engine's
+        # character limit is still sub-split via _force_split_segment; that is a
+        # sub-sentence fragment, which the contract allows.
+        if sentence_granularity and (lang_iso1 in _PYSBD_LANGUAGES):
+            # Full engine budget here, not the halved one upstream uses for its
+            # packer: we only ever sub-split a sentence that genuinely exceeds it.
+            max_chars = int(language_mapping[lang]['max_chars'])
+            spans = _sentence_spans(text, lang_iso1, max_chars,
+                                    _clean_len, _strip_escaped_sml, _strip_leading_noise,
+                                    _force_split_segment)
+            if spans:
+                # Map escaped-text offsets back onto the caller's block text: each
+                # escaped SML char stands for the full original tag.
+                esc2orig = [0] * (len(text) + 1)
+                cursor = 0
+                for i, c in enumerate(text):
+                    esc2orig[i] = cursor
+                    o = ord(c)
+                    cursor += (len(sml_blocks[o - sml_escape_tag])
+                               if sml_escape_tag <= o < sml_escape_tag + len(sml_blocks) else 1)
+                esc2orig[len(text)] = cursor
+                fragments = [restore_sml(text[a:b], sml_blocks) for a, b in spans]
+                if with_spans:
+                    src_spans = [(esc2orig[a], esc2orig[b]) for a, b in spans]
+                    assert cursor == len(original_text), 'escape_sml offset map is inconsistent'
+                    return fragments, src_spans
+                return fragments
+            # No usable sentence spans (empty or pure-SML block): fall through.
 
         # Tokenize into content and SML runs
         segments = []
@@ -1981,14 +2134,17 @@ def get_sentences(session_id:str, text:str)->list|None:
                     ideogram_list.append(s)
             if ideogram_list:
                 ideogram_list = [restore_sml(s, sml_blocks) for s in ideogram_list]
-            return ideogram_list
+            return (ideogram_list, None) if with_spans else ideogram_list
 
         if final_list:
             final_list = [restore_sml(s, sml_blocks) for s in final_list]
-        return final_list
+        # Upstream's packer keeps no offsets, so a caller asking for spans on this
+        # path gets None rather than a guess — a wrong offset silently highlights
+        # the wrong words, which is worse than an absent one.
+        return (final_list, None) if with_spans else final_list
     except Exception as e:
         print(f'get_sentences() error: {e}')
-        return None
+        return (None, None) if with_spans else None
 
 def get_sanitized(str:str, replacement:str='_')->str:
     str = str.replace('&', 'And')
@@ -2422,16 +2578,39 @@ def normalize_sml_tags(text:str)->tuple[bool, str]:
 def escape_sml(text:str)->tuple[str, list[str]]:
     sml_blocks:list[str] = []
 
-    def _replace(m:re.Match[str])->str:
-        sml_blocks.append(m.group(0))
+    def _escape(s:str)->str:
+        sml_blocks.append(s)
         return chr(sml_escape_tag + len(sml_blocks) - 1)
 
-    return SML_TAG_PATTERN.sub(_replace, text), sml_blocks
+    # Every downstream consumer treats ord(c) >= sml_escape_tag as "this is an
+    # escaped/protected unit". A source character that already lives in that
+    # range (private-use-area glyphs from some EPUB font subsets) would collide
+    # with a tag placeholder and be corrupted by restore_sml()'s replace-by-
+    # codepoint, so it must be escaped into sml_blocks too, not just SML tags.
+    out:list[str] = []
+    last = 0
+    for m in SML_TAG_PATTERN.finditer(text):
+        start, end = m.span()
+        for c in text[last:start]:
+            out.append(_escape(c) if ord(c) >= sml_escape_tag else c)
+        out.append(_escape(m.group(0)))
+        last = end
+    for c in text[last:]:
+        out.append(_escape(c) if ord(c) >= sml_escape_tag else c)
+    return ''.join(out), sml_blocks
 
 def restore_sml(text:str, sml_blocks:list[str])->str:
-    for i, block in enumerate(sml_blocks):
-        text = text.replace(chr(sml_escape_tag + i), block)
-    return text
+    if not sml_blocks:
+        return text
+    # A single sequential .replace() per block would let a restored block's
+    # content (e.g. a genuine source PUA glyph escaped_sml() protected) collide
+    # with a placeholder for a later block and get replaced again, cascading
+    # into corrupted output. Matching every placeholder in one pass over the
+    # ORIGINAL text avoids rescanning substituted content.
+    placeholder_pattern = re.compile(
+        f'[{chr(sml_escape_tag)}-{chr(sml_escape_tag + len(sml_blocks) - 1)}]'
+    )
+    return placeholder_pattern.sub(lambda m: sml_blocks[ord(m.group(0)) - sml_escape_tag], text)
 
 def sml_token(tag:str, value:str|None=None, close:bool=False)->str:
     if close:
@@ -3061,6 +3240,21 @@ def combine_audio_chapters(session_id:str)->list[str]|None:
                 error = f'{Path(final_file).name} is corrupted or does not exist'
                 print(error)
                 return False
+            sync_map_path = os.path.join(session['audiobooks_dir'], f'{Path(final_file).stem}.sync-map.json')
+            # Replace only the filename's suffix, not the whole path: an
+            # unrestricted string replace would also rewrite a directory
+            # component that happens to contain the literal ".sync-map.json".
+            normalised_text_path = str(Path(sync_map_path).with_name(
+                Path(sync_map_path).name.replace('.sync-map.json', '.normalised-text.json')))
+            # A stale pair from a previous build of this same stem must not survive
+            # a failed regeneration, or a reconversion with sync maps disabled: the
+            # audio above was just overwritten, so a leftover sync map would
+            # describe the wrong timings/offsets for it. Clear it now, right after
+            # the audio is confirmed replaced, so a later VTT/sync-map failure
+            # can't leave the stale pair behind.
+            for stale_path in (sync_map_path, normalised_text_path):
+                if os.path.exists(stale_path):
+                    os.unlink(stale_path)
             if session['output_format'] in ['mp3', 'm4a', 'm4b', 'mp4'] and session['cover'] is not None:
                 cover_path = session['cover']
                 msg = f'Adding cover {cover_path} into the final audiobook file…'
@@ -3090,6 +3284,21 @@ def combine_audio_chapters(session_id:str)->list[str]|None:
                 error = f'build_vtt_file() error: {error}'
                 print(error)
                 return False
+            if emit_sync_map:
+                sync_built, sync_error = build_sync_map_file(
+                    session,
+                    sync_map_path=sync_map_path,
+                    get_sentences=get_sentences,
+                    session_id=session_id,
+                    final_file=final_file,
+                    block_indices=block_indices,
+                )
+                if not sync_built:
+                    # The audiobook and its VTT are already correct; the sync map is
+                    # an extra artefact, so a failure here is loud but not fatal.
+                    error = f'build_sync_map_file() error: {sync_error}'
+                    print(error)
+                    show_alert(session_id, {'type': 'warning', 'msg': error})
             return True
         except Exception as e:
             error = f'Export failed: {e}'
@@ -3746,15 +3955,23 @@ def convert_ebook(args:dict)->tuple:
                                 blocks_orig = load_json_blocks(session['blocks_orig_json'])
                                 if blocks_orig:
                                     blocks = blocks_orig.get('blocks', [])
+                                    sources = blocks_orig.get('block_sources', [])
                                     new_blocks = []
-                                    for block in blocks:
+                                    new_sources = []
+                                    for i, block in enumerate(blocks):
                                         if any(c.isalnum() for c in block.get('text','')):
                                             if not block.get('id'):
                                                 block['id'] = str(uuid.uuid4())
                                                 is_changed = True
                                             new_blocks.append(block)
+                                            new_sources.append(sources[i] if i < len(sources) else None)
                                     blocks_orig['blocks'] = new_blocks
+                                    blocks_orig['block_sources'] = new_sources
                                     session['blocks_orig'] = blocks_orig
+                                    # Restore the source metadata this session's own get_blocks()
+                                    # never ran to populate — a resumed process without an EPUB
+                                    # change loads blocks_orig_json and skips get_blocks() entirely.
+                                    session['block_sources'] = new_sources
                                 if is_changed:
                                     save_json_blocks(session_id, 'blocks_orig')
                             # load previous work unconditionally: it must survive a source file change
@@ -3821,6 +4038,14 @@ def convert_ebook(args:dict)->tuple:
                                                 if error is not None:
                                                     return error, False
                                             if raw_blocks:
+                                                # Keep block_sources aligned with the
+                                                # blocks that actually survive the
+                                                # empty-text filter below.
+                                                _sources = list(session.get('block_sources') or [])
+                                                session['block_sources'] = [
+                                                    _sources[k] if k < len(_sources) else None
+                                                    for k, t in enumerate(raw_blocks) if t
+                                                ]
                                                 session['blocks_orig'] = {
                                                     "page": 0,
                                                     "block_resume": 0,
@@ -3841,6 +4066,10 @@ def convert_ebook(args:dict)->tuple:
                                                         }
                                                         for t in raw_blocks if t
                                                     ],
+                                                    # Persisted so a resumed process — which loads
+                                                    # this JSON instead of re-running get_blocks() —
+                                                    # still has the chapters[].href/title source.
+                                                    "block_sources": session['block_sources'],
                                                 }
                                             if session.get('blocks_orig', {}):
                                                 if blocks_orig_old:
@@ -4049,6 +4278,7 @@ def reset_ebook_session(session_id:str, force:bool, filter_keys:bool)->None:
         "filename_noext": None,
         "cover": None,
         "blocks_orig": {},
+        "block_sources": [],
         "blocks_saved": {},
         "blocks_current": {},
         "blocks_orig_json": None,
