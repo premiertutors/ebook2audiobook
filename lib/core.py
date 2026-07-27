@@ -4342,23 +4342,36 @@ def is_stock_voice(tts_engine:str|None, voice:Any)->bool:
         return False
     return voice in default_engine_settings.get(tts_engine, {}).get('voices', {})
 
+def resolve_session_device(session:Any)->str:
+    # The torch device a session will actually run on. Mirrors the convert-time
+    # pre-check in convert_ebook(): an accelerator the installed torch cannot
+    # use, or one the engine does not declare in 'supported_devices', runs on
+    # CPU. Adapters that key their loaded_tts entry by device resolve the same
+    # way, so this reproduces their key without holding an adapter instance.
+    cpu = devices['CPU']['proc']
+    device = session.get('device') or cpu
+    if not next((d['found'] for d in devices.values() if d['proc'] == device), False):
+        return cpu
+    supported = default_engine_settings.get(session.get('tts_engine'), {}).get('supported_devices')
+    if supported and device not in supported:
+        return cpu
+    return device
+
 def cleanup_models_cache()->None:
     try:
-        active_models = {
-            cache
-            for session in context.sessions.values()
-            for cache in (session.get('model_cache'), session.get('model_zs_cache'), session.get('stanza_cache'))
-            if cache is not None
-        }
-        # Some adapters (kokoro) qualify their loaded_tts key with the resolved
-        # torch device so a CPU-loaded model is never handed to a CUDA session.
-        # Those keys still belong to an active model_cache value, so keep them
-        # alive instead of evicting the model on every conversion.
-        active_models |= {
-            f"{cache}-{device['proc']}"
-            for cache in list(active_models)
-            for device in devices.values()
-        }
+        active_models = set()
+        for session in context.sessions.values():
+            # Some adapters (kokoro) qualify their loaded_tts key with the
+            # resolved torch device so a CPU-loaded model is never handed to a
+            # CUDA session. Only the variant this session resolves to right now
+            # is live: retaining every device variant would keep an obsolete
+            # CUDA model referenced after the session switched to CPU, so its
+            # VRAM could never be released.
+            device = resolve_session_device(session)
+            for cache in (session.get('model_cache'), session.get('model_zs_cache'), session.get('stanza_cache')):
+                if cache is not None:
+                    active_models.add(cache)
+                    active_models.add(f"{cache}-{device}")
         for key in list(loaded_tts.keys()):
             if key not in active_models:
                 del loaded_tts[key]
