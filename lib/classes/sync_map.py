@@ -350,6 +350,16 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
         book_stem = session.get('filename_noext') or Path(final_file).stem
         if session.get('translate_enabled') and session.get('translate'):
             book_stem = f"{book_stem}_{session['translate']}"
+        # The stem alone is the basename, so two different ebooks both called book.epub
+        # would collide on one bookId and cross-contaminate sync data keyed on it. Fold in
+        # an identity digest of the source file: same file -> same id (re-compiling with a
+        # different voice stays stable); different files sharing a name diverge. A re-issued
+        # edition (different bytes) becomes a new book, which is the honest reading of the
+        # contract -- its offsets would not resolve against the old text anyway.
+        source_path = session.get('ebook')
+        source_hash = _sha256_file(source_path) if source_path else None
+        if source_hash:
+            book_stem = f"{book_stem}-{source_hash[len('sha256:'):][:8]}"
         book_id = _slug(book_stem)
         voice_label = _slug(Path(voice_path).stem) if voice_path else _slug(str(session['fine_tuned']))
         build_id = '__'.join([
