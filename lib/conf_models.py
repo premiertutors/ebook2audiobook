@@ -126,6 +126,9 @@ default_engine_settings = {
         "languages": {"eng": "b"},
         "samplerate": 24000,
         "speed": 1.0,
+        # Torch device strings; anything else is normalized to CPU by core
+        # BEFORE the memory check (the adapter would fall back to CPU anyway).
+        "supported_devices": ["cpu", "cuda"],
         "files": [],
         "voice": None,
         "voices": {

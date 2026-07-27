@@ -3902,6 +3902,13 @@ def convert_ebook(args:dict)->tuple:
                         if not devices['XPU']['found']:
                             session['device'] = devices['CPU']['proc']
                             msg += f"XPU not supported by the Torch installed!<br/>Read {default_gpu_wiki}<br/>Switching to CPU"
+                    supported_devices = default_engine_settings[session['tts_engine']].get('supported_devices')
+                    if supported_devices and session['device'] not in supported_devices:
+                        # Normalize BEFORE the memory check below: an engine that will
+                        # run on CPU anyway must not be rejected because the selected
+                        # accelerator reports too little (or undetectable) memory.
+                        msg += f"{session['tts_engine']} runs on {', '.join(supported_devices)} only.<br/>Switching to CPU"
+                        session['device'] = devices['CPU']['proc']
                     vram_dict = VRAMDetector().detect_vram(session['device'], session['script_mode'])
                     print(f'vram_dict: {vram_dict}')
                     total_vram_gb = vram_dict.get('total_vram_gb', 0)
