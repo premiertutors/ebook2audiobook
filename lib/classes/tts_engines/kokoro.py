@@ -114,9 +114,10 @@ class Kokoro(TTSUtils, TTSRegistry, name='kokoro'):
             from lib.classes.tts_engines.common.audio import detect_gender
             gender = detect_gender(voice)
             mapped = 'bf_emma' if gender == 'female' else 'bm_george'
+            detail = '' if gender else ' Pitch analysis was inconclusive, so the default voice was used.'
             msg = (
                 f"WARNING: Kokoro cannot clone voices. Reference voice {voice} "
-                f"(detected gender: {gender or 'unknown'}) is mapped to stock voice '{mapped}'. "
+                f"is mapped to the nearest stock voice '{mapped}'.{detail} "
                 f"Use E2A_KOKORO_VOICE=<id> to pick one of: {sorted(self.voice_ids)}"
             )
             print(msg)
