@@ -6,6 +6,7 @@ xtts_builtin_speakers_list = {}
 
 TTS_ENGINES = {
     "XTTS": "xtts",
+    "KOKORO": "kokoro",
     "BARK": "bark",
     "TORTOISE": "tortoise",
     "PIPER": "piper",
@@ -66,7 +67,7 @@ default_voice_detection_model = 'drewThomasson/segmentation'
 default_speaker = os.path.join(voices_dir, 'eng', 'adult', 'male', 'KumarDahl.wav')
 
 tts_engines_from_coqui = [TTS_ENGINES['XTTS'], TTS_ENGINES['BARK'], TTS_ENGINES['TORTOISE'], TTS_ENGINES['VITS'], TTS_ENGINES['FAIRSEQ'], TTS_ENGINES['GLOWTTS'], TTS_ENGINES['TACOTRON'], TTS_ENGINES['YOURTTS']]
-tts_engines_with_inner_speaker = [TTS_ENGINES['PIPER'], TTS_ENGINES['VITS'], TTS_ENGINES['FAIRSEQ'], TTS_ENGINES['GLOWTTS'], TTS_ENGINES['TACOTRON'], TTS_ENGINES['YOURTTS']]
+tts_engines_with_inner_speaker = [TTS_ENGINES['KOKORO'], TTS_ENGINES['PIPER'], TTS_ENGINES['VITS'], TTS_ENGINES['FAIRSEQ'], TTS_ENGINES['GLOWTTS'], TTS_ENGINES['TACOTRON'], TTS_ENGINES['YOURTTS']]
 tts_engines_with_custom_model = (TTS_ENGINES['PIPER'], TTS_ENGINES['XTTS'], TTS_ENGINES['VITS'], TTS_ENGINES['FAIRSEQ'])
 
 max_custom_model = 100
@@ -114,6 +115,40 @@ default_engine_settings = {
             "MarcosRudaski": "Marcos Rudaski"
         },
         "rating": {"VRAM": 4, "CPU": 2, "RAM": 4, "Realism": 5}
+    },
+    TTS_ENGINES['KOKORO']: {
+        # hexgrad/Kokoro-82M (Apache-2.0). CPU-first engine: 82M params, 24 kHz,
+        # 5-20x realtime on modern CPUs. No voice cloning, no fine-tuned models —
+        # stock voices only (ids below are the upstream HF voices/*.pt names).
+        # Only English is declared: the adapter installs misaki[en] G2P; the
+        # lang code ('a' US / 'b' GB) is derived from the voice id prefix.
+        "repo": "hexgrad/Kokoro-82M",
+        "languages": {"eng": "b"},
+        "samplerate": 24000,
+        "speed": 1.0,
+        # Torch device strings; anything else is normalized to CPU by core
+        # BEFORE the memory check (the adapter would fall back to CPU anyway).
+        "supported_devices": ["cpu", "cuda"],
+        "files": [],
+        "voice": None,
+        "voices": {
+            "bm_george": "George (en-GB male)", "bm_lewis": "Lewis (en-GB male)",
+            "bm_daniel": "Daniel (en-GB male)", "bm_fable": "Fable (en-GB male)",
+            "bf_alice": "Alice (en-GB female)", "bf_emma": "Emma (en-GB female)",
+            "bf_isabella": "Isabella (en-GB female)", "bf_lily": "Lily (en-GB female)",
+            "af_heart": "Heart (en-US female)", "af_alloy": "Alloy (en-US female)",
+            "af_aoede": "Aoede (en-US female)", "af_bella": "Bella (en-US female)",
+            "af_jessica": "Jessica (en-US female)", "af_kore": "Kore (en-US female)",
+            "af_nicole": "Nicole (en-US female)", "af_nova": "Nova (en-US female)",
+            "af_river": "River (en-US female)", "af_sarah": "Sarah (en-US female)",
+            "af_sky": "Sky (en-US female)",
+            "am_adam": "Adam (en-US male)", "am_echo": "Echo (en-US male)",
+            "am_eric": "Eric (en-US male)", "am_fenrir": "Fenrir (en-US male)",
+            "am_liam": "Liam (en-US male)", "am_michael": "Michael (en-US male)",
+            "am_onyx": "Onyx (en-US male)", "am_puck": "Puck (en-US male)",
+            "am_santa": "Santa (en-US male)"
+        },
+        "rating": {"VRAM": 1, "CPU": 5, "RAM": 2, "Realism": 4}
     },
     TTS_ENGINES['BARK']: {
         "languages": {"deu": "de", "eng": "en", "fra": "fr", "hin": "hi", "ita": "it", "jpn": "ja", "kor": "ko", "pol": "pl", "por": "pt", "rus": "ru", "spa": "es", "tur": "tr", "zho": "zh-cn"},

@@ -3864,7 +3864,12 @@ def convert_ebook(args:dict)->tuple:
                                     error = f'{os.path.basename(f)} is not a valid model or some required files are missing'
                             except ModuleNotFoundError as e:
                                 error = f"No presets module for TTS engine '{session['tts_engine']}': {e}"
-                    if session.get('voice'):
+                    if session.get('voice') and not os.path.exists(session['voice']) and is_stock_voice(session['tts_engine'], session['voice']):
+                        # A stock voice id (e.g. kokoro 'af_heart') is not an audio file:
+                        # skip the path-oriented extraction stage and let the engine
+                        # adapter resolve the id itself.
+                        pass
+                    elif session.get('voice'):
                         voice_name = os.path.splitext(os.path.basename(session['voice']))[0].replace('&', 'And')
                         voice_name = get_sanitized(voice_name)
                         final_voice_file = os.path.join(session['voice_dir'], f'{voice_name}.wav')
@@ -3902,6 +3907,13 @@ def convert_ebook(args:dict)->tuple:
                         if not devices['XPU']['found']:
                             session['device'] = devices['CPU']['proc']
                             msg += f"XPU not supported by the Torch installed!<br/>Read {default_gpu_wiki}<br/>Switching to CPU"
+                    supported_devices = default_engine_settings[session['tts_engine']].get('supported_devices')
+                    if supported_devices and session['device'] not in supported_devices:
+                        # Normalize BEFORE the memory check below: an engine that will
+                        # run on CPU anyway must not be rejected because the selected
+                        # accelerator reports too little (or undetectable) memory.
+                        msg += f"{session['tts_engine']} runs on {', '.join(supported_devices)} only.<br/>Switching to CPU"
+                        session['device'] = devices['CPU']['proc']
                     vram_dict = VRAMDetector().detect_vram(session['device'], session['script_mode'])
                     print(f'vram_dict: {vram_dict}')
                     total_vram_gb = vram_dict.get('total_vram_gb', 0)
@@ -4321,14 +4333,45 @@ def reset_ebook_session(session_id:str, force:bool, filter_keys:bool)->None:
     }
     restore_session_from_data(data, session, force, filter_keys=filter_keys)
 
+def is_stock_voice(tts_engine:str|None, voice:Any)->bool:
+    # True when `voice` is an engine stock voice id (e.g. kokoro 'af_heart')
+    # rather than a path to an audio file. Callers that also accept paths must
+    # test os.path.exists() first: engines whose GUI values are wav paths keep
+    # their file stems in the same 'voices' mapping.
+    if not isinstance(voice, str) or not isinstance(tts_engine, str):
+        return False
+    return voice in default_engine_settings.get(tts_engine, {}).get('voices', {})
+
+def resolve_session_device(session:Any)->str:
+    # The torch device a session will actually run on. Mirrors the convert-time
+    # pre-check in convert_ebook(): an accelerator the installed torch cannot
+    # use, or one the engine does not declare in 'supported_devices', runs on
+    # CPU. Adapters that key their loaded_tts entry by device resolve the same
+    # way, so this reproduces their key without holding an adapter instance.
+    cpu = devices['CPU']['proc']
+    device = session.get('device') or cpu
+    if not next((d['found'] for d in devices.values() if d['proc'] == device), False):
+        return cpu
+    supported = default_engine_settings.get(session.get('tts_engine'), {}).get('supported_devices')
+    if supported and device not in supported:
+        return cpu
+    return device
+
 def cleanup_models_cache()->None:
     try:
-        active_models = {
-            cache
-            for session in context.sessions.values()
-            for cache in (session.get('model_cache'), session.get('model_zs_cache'), session.get('stanza_cache'))
-            if cache is not None
-        }
+        active_models = set()
+        for session in context.sessions.values():
+            # Some adapters (kokoro) qualify their loaded_tts key with the
+            # resolved torch device so a CPU-loaded model is never handed to a
+            # CUDA session. Only the variant this session resolves to right now
+            # is live: retaining every device variant would keep an obsolete
+            # CUDA model referenced after the session switched to CPU, so its
+            # VRAM could never be released.
+            device = resolve_session_device(session)
+            for cache in (session.get('model_cache'), session.get('model_zs_cache'), session.get('stanza_cache')):
+                if cache is not None:
+                    active_models.add(cache)
+                    active_models.add(f"{cache}-{device}")
         for key in list(loaded_tts.keys()):
             if key not in active_models:
                 del loaded_tts[key]
