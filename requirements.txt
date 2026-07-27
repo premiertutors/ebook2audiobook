@@ -70,5 +70,8 @@ huggingface_hub>=1.0; python_version >= '3.12'
 transformers==4.57.6; python_version < '3.12'
 transformers>=5.0.0; python_version >= '3.12'
 coqui-tts[languages]==0.27.5
+# kokoro (hexgrad/Kokoro-82M) — fast CPU lane; deps are unpinned upstream so it
+# does not move the torch/transformers versions pinned above
+kokoro==0.9.4
 piper-tts==1.4.2
 ./ext/py/demucs

@@ -1,4 +1,5 @@
 from .xtts import XTTS
+from .kokoro import Kokoro
 from .bark import Bark
 from .vits import Vits
 from .fairseq import Fairseq
