@@ -116,7 +116,7 @@ class Kokoro(TTSUtils, TTSRegistry, name='kokoro'):
             mapped = 'bf_emma' if gender == 'female' else 'bm_george'
             detail = '' if gender else ' Pitch analysis was inconclusive, so the default voice was used.'
             msg = (
-                f"WARNING: Kokoro cannot clone voices. Reference voice {voice} "
+                f"WARNING: Kokoro cannot clone voices. Reference voice {Path(voice).name!r} "
                 f"is mapped to the nearest stock voice '{mapped}'.{detail} "
                 f"Use E2A_KOKORO_VOICE=<id> to pick one of: {sorted(self.voice_ids)}"
             )
