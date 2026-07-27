@@ -2879,11 +2879,30 @@ def convert_chapters2audio(session_id:str)->bool:
     session = context.get_session(session_id)
     if not (session and session.get('id', False)):
         return False
+    parallel_pool = None
     try:
         if session['cancellation_requested']:
             return False
         print(f'*********** Session: {session_id} **************\n{session_info}')
-        tts_manager = TTSManager(session)
+        # Built on first use: in the parallel lane every worker loads its own
+        # model, so a parent copy would be workers+1 models (~400 MB each for
+        # kokoro) with nothing to render. Blocks that fall back to the
+        # sequential lane, and the non-English voice normalization below, pull
+        # it in on demand.
+        tts_manager = None
+        def _tts_manager():
+            nonlocal tts_manager
+            if tts_manager is None:
+                tts_manager = TTSManager(session)
+            return tts_manager
+        # Sentence-parallel lane: opt-in per engine ("parallel_safe") + explicit
+        # worker count. Each worker holds its own model, so this stays off for
+        # heavyweight engines; kokoro at ~400 MB/worker is the intended user.
+        _parallel_workers = int(os.environ.get('E2A_PARALLEL_WORKERS', '0') or '0')
+        if _parallel_workers > 1 and default_engine_settings[session['tts_engine']].get('parallel_safe'):
+            from lib.classes.parallel_tts import ParallelSentencePool, resolve_inline_voices
+            parallel_pool = ParallelSentencePool(session, _parallel_workers)
+            print(f'Parallel synthesis: {_parallel_workers} workers')
         blocks_current = session['blocks_current']
         blocks = blocks_current['blocks']
         block_resume = blocks_current['block_resume']
@@ -2906,7 +2925,7 @@ def convert_chapters2audio(session_id:str)->bool:
                     if old_voice is None:
                         new_voice = None
                     else:
-                        new_voice, error = tts_manager.set_voice(old_voice)
+                        new_voice, error = _tts_manager().set_voice(old_voice)
                         if new_voice is None and error is not None:
                             show_alert(session_id, {'type': 'warning', 'msg': error})
                             return False
@@ -2960,6 +2979,7 @@ def convert_chapters2audio(session_id:str)->bool:
                 block_len = len(sentences)
                 valid_idx = {i for i,s in enumerate(sentences) if any(c.isalnum() for c in s.strip())}
                 last_idx = block_len - 1
+                use_parallel = parallel_pool is not None
                 sent_start = global_sent
                 current_hash = block_hash(block)
                 block_ref = prev_blocks.get(block_id)
@@ -2983,12 +3003,26 @@ def convert_chapters2audio(session_id:str)->bool:
                             continue
                         show_alert(session_id, {'type': 'warning', 'msg': f'Block {x} has {len(missing_sentences)} missing audio files, reconverting…'})
                         _reset_chapter_file(block_id)
-                elif block_changed and x <= block_resume:
+                elif block_changed:
+                    # Position relative to block_resume says nothing about
+                    # whether stale audio exists: realignment can move an id
+                    # that was already rendered to an index past the resume
+                    # pointer. The parallel lane reconciles by file existence,
+                    # so a changed block must be purged wherever it sits, or
+                    # its old sentence files would be reused verbatim.
                     show_alert(session_id, {'type': 'info', 'msg': f'Chapter {ch_num} (block {x}) — changed, reconverting'})
                     _reset_chapter_file(block_id)
                 elif x == block_resume and not block_changed:
+                    # The parallel lane finishes sentences out of order, so
+                    # sentence_resume cannot describe a partial block: it stays
+                    # at its start value until the block completes. Wiping the
+                    # dir on sentence_resume == 0 would therefore throw away
+                    # every file an interrupted parallel block did write. Keep
+                    # them and reconcile by existence below — but only when a
+                    # saved baseline vouches for the block being unchanged.
                     if sentence_resume == 0 and os.path.isdir(block_dir):
-                        shutil.rmtree(block_dir)
+                        if not (use_parallel and block_ref is not None):
+                            shutil.rmtree(block_dir)
                     start_sentence = sentence_resume
                 show_alert(session_id, {'type': 'info', 'msg': f'Chapter {ch_num} (block {x}) containing {block_len} sentences…'})
                 os.makedirs(block_dir, exist_ok=True)
@@ -2998,7 +3032,62 @@ def convert_chapters2audio(session_id:str)->bool:
                 save_db_stamp(session_id)
                 converted = False
                 block_voice = block.get('voice') or session.get('voice')
-                for j in range(block_len):
+                if use_parallel:
+                    # Parallel lane: render every pending sentence of the block
+                    # concurrently. Files land out of order, so what is already
+                    # done is defined by what is already on disk — never by
+                    # sentence_resume, which stays block-granular here.
+                    #
+                    # An inline [voice:…] scope spanning sentences is resolved
+                    # here rather than disqualifying the block: each task is
+                    # told the scope it starts in, so no block needs the
+                    # sequential lane and the parent never loads a model.
+                    ordered_idx = sorted(valid_idx)
+                    inline_voices = resolve_inline_voices(sentences, ordered_idx)
+                    pending = []
+                    for j in ordered_idx:
+                        sentence_file = os.path.join(block_dir, f'{j}.{default_audio_proc_format}')
+                        if os.path.exists(sentence_file):
+                            continue
+                        pending.append((sentence_file, sentences[j].strip(), block_voice, inline_voices[j]))
+                    if pending and not baseline_initialized:
+                        session['blocks_current'] = blocks_current
+                        session['blocks_saved'] = copy.deepcopy(blocks_current)
+                        save_json_blocks(session_id, 'blocks_saved')
+                        baseline_initialized = True
+                    skipped = len(valid_idx) - len(pending)
+                    if skipped > 0:
+                        t.update(skipped)
+                    pending_text = {f: s for (f, s, _v, _iv) in pending}
+
+                    def _on_done(_file):
+                        total_progress = (t.n + 1) / total_sentences
+                        if session['is_gui_process']:
+                            # track_tqdm is off, so the Gradio bar only moves if
+                            # this callback drives it explicitly.
+                            progress_bar(progress=total_progress, desc=f"{ebook_name} - {pending_text.get(_file, '')}")
+                        t.set_description(f'{total_progress * 100:.2f}%')
+                        t.update(1)
+
+                    ok, perr = parallel_pool.convert_block(
+                        pending,
+                        cancelled=lambda: session['cancellation_requested'],
+                        on_done=_on_done,
+                    )
+                    if not ok:
+                        show_alert(session_id, {'type': 'warning', 'msg': perr})
+                        return False
+                    # Nothing pending can also mean the sentences all survived
+                    # an interruption that happened before the chapter was
+                    # assembled — that still needs the combine step below.
+                    converted = bool(pending) or not os.path.exists(chapter_audio_file)
+                    global_sent += len(valid_idx)
+                    if converted:
+                        blocks_current['sentence_resume'] = last_idx
+                        session['blocks_current'] = blocks_current
+                        save_db_stamp(session_id)
+                        last_save_time = time.monotonic()
+                for j in (range(block_len) if not use_parallel else ()):
                     if session['cancellation_requested']:
                         msg = 'Conversion Cancelled'
                         return False
@@ -3008,7 +3097,7 @@ def convert_chapters2audio(session_id:str)->bool:
                             if j == start_sentence and start_sentence > 0:
                                 show_alert(session_id, {'type': 'info', 'msg': f'*** Resuming from sentence {global_sent} ***'})
                             sentence_file = os.path.join(block_dir, f'{j}.{default_audio_proc_format}')
-                            run, error = tts_manager.convert_sentence2audio(sentence_file, sentence, block_voice=block_voice)
+                            run, error = _tts_manager().convert_sentence2audio(sentence_file, sentence, block_voice=block_voice)
                             if not run:
                                 show_alert(session_id, {'type': 'warning', 'msg': error})
                                 return False
@@ -3052,6 +3141,9 @@ def convert_chapters2audio(session_id:str)->bool:
         DependencyError(e)
         exception_alert(session_id, f'convert_chapters2audio() error: {e}')
         return False
+    finally:
+        if parallel_pool is not None:
+            parallel_pool.shutdown()
 
 def combine_audio_sentences(session_id:str, file:str, block_id:str, sentence_count:int)->bool:
     try:
