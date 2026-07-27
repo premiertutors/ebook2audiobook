@@ -1855,15 +1855,17 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
         return bool(s) and all(ord(c) >= sml_escape_tag for c in s)
 
     def _strip_leading_noise(s:str)->str:
-        # Inverted marks (¿¡) and opening quotes/brackets (Unicode categories Ps/Pi)
-        # are valid sentence-opening punctuation, not extraction noise — stop there
-        # instead of stripping them, so e.g. Spanish "¿Cómo estás?" keeps its ¿.
+        # Inverted marks (¿¡), straight quotes ("'), and opening quotes/brackets
+        # (Unicode categories Ps/Pi) are valid sentence-opening punctuation, not
+        # extraction noise — stop there instead of stripping them, so e.g. Spanish
+        # "¿Cómo estás?" keeps its ¿ and `"Hello."` keeps its opening ". Straight
+        # quotes are category Po (not Pi), so they need an explicit exception.
         i = 0
         n = len(s)
         while i < n:
             c = s[i]
             if (c.isalnum() or c == '_' or c.isspace() or ord(c) >= sml_escape_tag
-                    or c in '¿¡' or unicodedata.category(c) in ('Ps', 'Pi')):
+                    or c in '¿¡"\'' or unicodedata.category(c) in ('Ps', 'Pi')):
                 break
             i += 1
         return s[i:].lstrip()
@@ -2598,9 +2600,17 @@ def escape_sml(text:str)->tuple[str, list[str]]:
     return ''.join(out), sml_blocks
 
 def restore_sml(text:str, sml_blocks:list[str])->str:
-    for i, block in enumerate(sml_blocks):
-        text = text.replace(chr(sml_escape_tag + i), block)
-    return text
+    if not sml_blocks:
+        return text
+    # A single sequential .replace() per block would let a restored block's
+    # content (e.g. a genuine source PUA glyph escaped_sml() protected) collide
+    # with a placeholder for a later block and get replaced again, cascading
+    # into corrupted output. Matching every placeholder in one pass over the
+    # ORIGINAL text avoids rescanning substituted content.
+    placeholder_pattern = re.compile(
+        f'[{chr(sml_escape_tag)}-{chr(sml_escape_tag + len(sml_blocks) - 1)}]'
+    )
+    return placeholder_pattern.sub(lambda m: sml_blocks[ord(m.group(0)) - sml_escape_tag], text)
 
 def sml_token(tag:str, value:str|None=None, close:bool=False)->str:
     if close:
@@ -3231,7 +3241,11 @@ def combine_audio_chapters(session_id:str)->list[str]|None:
                 print(error)
                 return False
             sync_map_path = os.path.join(session['audiobooks_dir'], f'{Path(final_file).stem}.sync-map.json')
-            normalised_text_path = sync_map_path.replace('.sync-map.json', '.normalised-text.json')
+            # Replace only the filename's suffix, not the whole path: an
+            # unrestricted string replace would also rewrite a directory
+            # component that happens to contain the literal ".sync-map.json".
+            normalised_text_path = str(Path(sync_map_path).with_name(
+                Path(sync_map_path).name.replace('.sync-map.json', '.normalised-text.json')))
             # A stale pair from a previous build of this same stem must not survive
             # a failed regeneration, or a reconversion with sync maps disabled: the
             # audio above was just overwritten, so a leftover sync map would

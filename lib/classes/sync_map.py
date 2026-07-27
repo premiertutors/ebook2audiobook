@@ -398,7 +398,12 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
         # temporary files first and are only renamed into place once both writes
         # succeed, so a mid-write failure (e.g. disk full) can't leave a truncated
         # or mismatched sidecar behind.
-        normalised_path = str(sync_map_path).replace('.sync-map.json', '.normalised-text.json')
+        # Replace only the filename's suffix, not the whole path: an unrestricted
+        # string replace would also rewrite a directory component that happens
+        # to contain the literal ".sync-map.json".
+        sync_map_path_obj = Path(sync_map_path)
+        normalised_path = str(sync_map_path_obj.with_name(
+            sync_map_path_obj.name.replace('.sync-map.json', '.normalised-text.json')))
         normalised_tmp = normalised_path + '.tmp'
         sync_map_tmp = str(sync_map_path) + '.tmp'
         try:
