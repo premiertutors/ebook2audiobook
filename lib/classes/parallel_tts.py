@@ -98,9 +98,30 @@ def _convert_one(sentence_file: str, sentence: str, block_voice, inline_voice) -
         params = getattr(_WORKER_TTS.engine, "params", None)
         if isinstance(params, dict):
             params["inline_voice"] = inline_voice
-        return _WORKER_TTS.convert_sentence2audio(
-            sentence_file, sentence, block_voice=block_voice
-        )
+        # Render to a sibling temp file and rename only on success. Resume in
+        # this lane treats a sentence file's existence as "done", so a file
+        # half-written when the process was killed would be skipped forever and
+        # fed to ffmpeg as-is. os.replace is atomic within the directory, so a
+        # file under the real name is always a complete render. The suffix
+        # keeps the extension (engines pick the container from it) and is
+        # dot-prefixed so it can never be mistaken for sentence `N`.
+        head, tail = os.path.split(sentence_file)
+        stem, ext = os.path.splitext(tail)
+        tmp_file = os.path.join(head, f".{stem}.part{ext}")
+        try:
+            ok, err = _WORKER_TTS.convert_sentence2audio(
+                tmp_file, sentence, block_voice=block_voice
+            )
+            if ok and os.path.exists(tmp_file):
+                os.replace(tmp_file, sentence_file)
+                return ok, err
+            return False, err or f"no audio produced for {os.path.basename(sentence_file)}"
+        finally:
+            if os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except OSError:
+                    pass
     except Exception as e:  # surfaced to the parent as an error result
         return False, f"parallel convert failed for {os.path.basename(sentence_file)}: {e}"
 
