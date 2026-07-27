@@ -71,6 +71,9 @@ class Kokoro(TTSUtils, TTSRegistry, name='kokoro'):
             if self.device != requested_device:
                 msg = f"Kokoro: device '{requested_device}' not supported by this adapter, using CPU."
                 print(msg)
+            # The loaded_tts cache is process-wide: key by device so a CPU-loaded
+            # model is never handed to a CUDA session (or vice versa) unchanged.
+            self.tts_key = f"{self.tts_key}-{self.device}"
             self.pipelines = {}
             self._mapped_voice_cache = {}
             self.engine = self.load_engine()
@@ -113,8 +116,14 @@ class Kokoro(TTSUtils, TTSRegistry, name='kokoro'):
                 return self._mapped_voice_cache[voice], None
             from lib.classes.tts_engines.common.audio import detect_gender
             gender = detect_gender(voice)
-            mapped = 'bf_emma' if gender == 'female' else 'bm_george'
-            detail = '' if gender else ' Pitch analysis was inconclusive, so the default voice was used.'
+            if gender:
+                mapped = 'bf_emma' if gender == 'female' else 'bm_george'
+                detail = ''
+            else:
+                # Inconclusive pitch: honour the configured default (which the
+                # warning below claims was used) rather than assuming male.
+                mapped = self.default_voice_id
+                detail = ' Pitch analysis was inconclusive, so the default voice was used.'
             msg = (
                 f"WARNING: Kokoro cannot clone voices. Reference voice {Path(voice).name!r} "
                 f"is mapped to the nearest stock voice '{mapped}'.{detail} "

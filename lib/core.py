@@ -3864,7 +3864,12 @@ def convert_ebook(args:dict)->tuple:
                                     error = f'{os.path.basename(f)} is not a valid model or some required files are missing'
                             except ModuleNotFoundError as e:
                                 error = f"No presets module for TTS engine '{session['tts_engine']}': {e}"
-                    if session.get('voice'):
+                    if session.get('voice') and not os.path.exists(session['voice']) and session['voice'] in default_engine_settings[session['tts_engine']].get('voices', {}):
+                        # A stock voice id (e.g. kokoro 'af_heart') is not an audio file:
+                        # skip the path-oriented extraction stage and let the engine
+                        # adapter resolve the id itself.
+                        pass
+                    elif session.get('voice'):
                         voice_name = os.path.splitext(os.path.basename(session['voice']))[0].replace('&', 'And')
                         voice_name = get_sanitized(voice_name)
                         final_voice_file = os.path.join(session['voice_dir'], f'{voice_name}.wav')
