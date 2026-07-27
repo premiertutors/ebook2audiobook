@@ -2,8 +2,12 @@
 
 The per-block sentence loop in core is embarrassingly parallel for stateless
 engines: each sentence renders to its own numbered file inside the block dir,
-and the resume system already reconciles a block by scanning for missing
-sentence files — so out-of-order completion needs no new bookkeeping.
+and core reconciles a block by scanning for the files already on disk — so
+out-of-order completion needs no new bookkeeping.
+
+The one piece of cross-sentence engine state is an inline [voice: …] scope.
+Core keeps any block whose scope stays open across a sentence boundary in the
+sequential lane, since two workers cannot share that state.
 
 Engines opt in with `"parallel_safe": True` in their default settings; the
 worker count comes from E2A_PARALLEL_WORKERS (0/1 = the classic sequential
@@ -46,6 +50,13 @@ def _init_worker(session, torch_threads: int) -> None:
 
 def _convert_one(sentence_file: str, sentence: str, block_voice) -> tuple:
     try:
+        # A worker is reused for unrelated sentences, so an inline [voice: …]
+        # scope must never bleed from one task into the next. Core keeps any
+        # block whose scope crosses a sentence boundary out of this lane, so
+        # clearing the sticky param here is always the correct starting state.
+        params = getattr(_WORKER_TTS.engine, "params", None)
+        if isinstance(params, dict):
+            params["inline_voice"] = None
         return _WORKER_TTS.convert_sentence2audio(
             sentence_file, sentence, block_voice=block_voice
         )
