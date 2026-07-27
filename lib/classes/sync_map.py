@@ -356,7 +356,17 @@ def build_sync_map_file(session: dict, sync_map_path: str, get_sentences, sessio
         # different voice stays stable); different files sharing a name diverge. A re-issued
         # edition (different bytes) becomes a new book, which is the honest reading of the
         # contract -- its offsets would not resolve against the old text anyway.
-        source_path = session.get('ebook')
+        # Hash the ORIGINAL upload, never session['ebook'] — that is a working copy the
+        # pipeline may rewrite: normalize_epub_zip() repackages a .zip wrapper with
+        # writestr(), which stamps every entry with the current local time, so the same
+        # source ZIP would hash differently on every run and the id would not be stable.
+        # 'text' is ebook_modes['TEXT'] spelled out: lib.core imports this module, so it
+        # cannot be imported back for the constant.
+        source_path = (
+            session.get('ebook_textarea_src')
+            if session.get('ebook_mode') == 'text'
+            else session.get('ebook_src')
+        ) or session.get('ebook')
         source_hash = _sha256_file(source_path) if source_path else None
         if source_hash:
             book_stem = f"{book_stem}-{source_hash[len('sha256:'):][:8]}"
