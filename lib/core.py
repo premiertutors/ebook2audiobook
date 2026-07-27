@@ -1772,11 +1772,11 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
                 i = m.end()
                 last = i
                 continue
-            if ord(sentence[i]) >= sml_escape_tag:
+            if _is_sml_cp(ord(sentence[i])):
                 if i > last:
                     parts.append(sentence[last:i])
                 j = i
-                while j < n and ord(sentence[j]) >= sml_escape_tag:
+                while j < n and _is_sml_cp(ord(sentence[j])):
                     j += 1
                 parts.append(sentence[i:j])
                 i = j
@@ -1787,8 +1787,15 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
             parts.append(sentence[last:])
         return parts
 
+    def _is_sml_cp(o:int)->bool:
+        # Bounded, not `>= sml_escape_tag`: placeholders occupy exactly
+        # [tag, tag + len(sml_blocks)), and an open-ended check swallowed raw
+        # supplementary-plane letters (>= U+10000) as if they were escapes.
+        # sml_blocks is assigned later in this function and resolved late.
+        return sml_escape_tag <= o < sml_escape_tag + len(sml_blocks)
+
     def _strip_escaped_sml(s:str)->str:
-        return ''.join(c for c in s if ord(c) < sml_escape_tag)
+        return ''.join(c for c in s if not _is_sml_cp(ord(c)))
 
     def _clean_len(s:str)->int:
         return len(_strip_escaped_sml(s))
@@ -1852,7 +1859,7 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
                 yield buffer
 
     def _is_pure_escaped_sml(s:str)->bool:
-        return bool(s) and all(ord(c) >= sml_escape_tag for c in s)
+        return bool(s) and all(_is_sml_cp(ord(c)) for c in s)
 
     def _strip_leading_noise(s:str)->str:
         # Inverted marks (¿¡), straight quotes ("'), and opening quotes/brackets
@@ -1864,7 +1871,7 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
         n = len(s)
         while i < n:
             c = s[i]
-            if (c.isalnum() or c == '_' or c.isspace() or ord(c) >= sml_escape_tag
+            if (c.isalnum() or c == '_' or c.isspace() or _is_sml_cp(ord(c))
                     or c in '¿¡"\'' or unicodedata.category(c) in ('Ps', 'Pi')):
                 break
             i += 1
@@ -1901,7 +1908,7 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
             if best_idx <= 0:
                 best_idx = max_chars
             # Safety: never cut inside an SML group
-            while best_idx < len(rest) and ord(rest[best_idx]) >= sml_escape_tag:
+            while best_idx < len(rest) and _is_sml_cp(ord(rest[best_idx])):
                 best_idx += 1
             left = rest[:best_idx].strip()
             right = rest[best_idx:].strip()
@@ -1971,12 +1978,12 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
         current_text = []
         while idx < tlen:
             c = text[idx]
-            if ord(c) >= sml_escape_tag:
+            if _is_sml_cp(ord(c)):
                 if current_text:
                     segments.append(('text', ''.join(current_text)))
                     current_text = []
                 start = idx
-                while idx < tlen and ord(text[idx]) >= sml_escape_tag:
+                while idx < tlen and _is_sml_cp(ord(text[idx])):
                     idx += 1
                 segments.append(('sml', text[start:idx]))
             else:
@@ -2009,7 +2016,7 @@ def get_sentences(session_id:str, text:str, with_spans:bool=False)->list|tuple|N
             cut_idx = -1
             j = len(combined) - 1
             while j >= 0:
-                if ord(combined[j]) >= sml_escape_tag:
+                if _is_sml_cp(ord(combined[j])):
                     cut_idx = j + 1
                     break
                 j -= 1
@@ -2582,21 +2589,29 @@ def escape_sml(text:str)->tuple[str, list[str]]:
         sml_blocks.append(s)
         return chr(sml_escape_tag + len(sml_blocks) - 1)
 
-    # Every downstream consumer treats ord(c) >= sml_escape_tag as "this is an
-    # escaped/protected unit". A source character that already lives in that
-    # range (private-use-area glyphs from some EPUB font subsets) would collide
-    # with a tag placeholder and be corrupted by restore_sml()'s replace-by-
-    # codepoint, so it must be escaped into sml_blocks too, not just SML tags.
+    # A source character can only collide with a tag placeholder if it lives in
+    # the BMP private-use area the placeholders are allocated from (U+E000 up).
+    # Only those need escaping into sml_blocks. Everything above the BMP —
+    # supplementary-plane letters such as U+20000 (CJK Ext B) — is ordinary
+    # text: escaping it made the sentence splitter treat it as an SML unit,
+    # excluding it from character budgets and emptiness checks.
+    def _collides(c:str)->bool:
+        return sml_escape_tag <= ord(c) <= 0xF8FF
+
     out:list[str] = []
     last = 0
     for m in SML_TAG_PATTERN.finditer(text):
         start, end = m.span()
         for c in text[last:start]:
-            out.append(_escape(c) if ord(c) >= sml_escape_tag else c)
+            out.append(_escape(c) if _collides(c) else c)
         out.append(_escape(m.group(0)))
         last = end
     for c in text[last:]:
-        out.append(_escape(c) if ord(c) >= sml_escape_tag else c)
+        out.append(_escape(c) if _collides(c) else c)
+    if sml_blocks and sml_escape_tag + len(sml_blocks) - 1 > 0xF8FF:
+        # 6,400 distinct units per block would be needed to get here; refuse the
+        # silent collision with real F900+ characters rather than corrupt text.
+        raise ValueError('SML placeholder allocation overflowed the private-use area')
     return ''.join(out), sml_blocks
 
 def restore_sml(text:str, sml_blocks:list[str])->str:
