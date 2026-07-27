@@ -1882,22 +1882,26 @@ def build_interface(args:dict)->gr.Blocks:
                         if session['voice'] is not None and isinstance(session.get('voice'), str):
                             if session['voice_dir'] not in session['voice']:
                                 if not any(v[1] == session['voice'] for v in voice_options):
+                                    repaired = None
                                     voice_path = Path(session['voice'])
                                     parts = list(voice_path.parts)
                                     if "voices" in parts:
                                         idx = parts.index("voices")
                                         if idx + 1 < len(parts):
-                                            parts[idx + 1] = language
-                                            new_voice_path = str(Path(*parts))
-                                            if os.path.exists(new_voice_path) and any(v[1] == new_voice_path for v in voice_options):
-                                                session['voice'] = new_voice_path
-                                            else:
-                                                parts[idx + 1] = 'eng'
+                                            for lang_dir_try in (language, 'eng'):
+                                                parts[idx + 1] = lang_dir_try
                                                 new_voice_path = str(Path(*parts))
                                                 if os.path.exists(new_voice_path) and any(v[1] == new_voice_path for v in voice_options):
-                                                    session['voice'] = new_voice_path
-                                                else:
-                                                    session['voice'] = voice_options[0][1]
+                                                    repaired = new_voice_path
+                                                    break
+                                    # A retained value the new engine does not offer must not
+                                    # survive — a stock voice id (e.g. kokoro 'af_heart') has no
+                                    # "voices" path component, so the repair above never sees it
+                                    # and it would otherwise reach the converter as a bogus path.
+                                    if repaired is not None:
+                                        session['voice'] = repaired
+                                    else:
+                                        session['voice'] = voice_options[0][1] if voice_options else None
                         else:
                             if voice_options and voice_options[0][1] is not None:
                                 new_voice_path = models[session['fine_tuned']]['voice']
@@ -2389,7 +2393,10 @@ def build_interface(args:dict)->gr.Blocks:
                                                     override = voice_map[os.path.basename(file)]
                                                 else:
                                                     override = default_voice
-                                                if override is not None and not os.path.exists(override):
+                                                # A stock voice id (e.g. kokoro 'af_heart') is a valid
+                                                # per-book override even though no such file exists —
+                                                # the engine adapter resolves the id itself.
+                                                if override is not None and not os.path.exists(override) and not is_stock_voice(args.get('tts_engine'), override):
                                                     msg = f'Voice override for {Path(file).name} not found, using default.'
                                                     show_alert(session_id, {
                                                         "type": "warning",
@@ -2755,7 +2762,10 @@ def build_interface(args:dict)->gr.Blocks:
                         if not os.path.exists(session['ebook']):
                             session['ebook'] = session['ebook_src'] = None
                     if isinstance(session.get('voice'), str):
-                        if not os.path.exists(session['voice']):
+                        # A stock voice id (e.g. kokoro 'bm_lewis') is not a file: keep it,
+                        # otherwise restoring a session would drop the selected voice and
+                        # clear ebook_src along with it.
+                        if not os.path.exists(session['voice']) and not is_stock_voice(session.get('tts_engine'), session['voice']):
                             session['voice'] = session['ebook_src'] = None
                     if isinstance(session.get('custom_model'), str):
                         custom_model_dir = session.get('custom_model_dir')

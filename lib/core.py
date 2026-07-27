@@ -3864,7 +3864,7 @@ def convert_ebook(args:dict)->tuple:
                                     error = f'{os.path.basename(f)} is not a valid model or some required files are missing'
                             except ModuleNotFoundError as e:
                                 error = f"No presets module for TTS engine '{session['tts_engine']}': {e}"
-                    if session.get('voice') and not os.path.exists(session['voice']) and session['voice'] in default_engine_settings[session['tts_engine']].get('voices', {}):
+                    if session.get('voice') and not os.path.exists(session['voice']) and is_stock_voice(session['tts_engine'], session['voice']):
                         # A stock voice id (e.g. kokoro 'af_heart') is not an audio file:
                         # skip the path-oriented extraction stage and let the engine
                         # adapter resolve the id itself.
@@ -4333,6 +4333,15 @@ def reset_ebook_session(session_id:str, force:bool, filter_keys:bool)->None:
     }
     restore_session_from_data(data, session, force, filter_keys=filter_keys)
 
+def is_stock_voice(tts_engine:str|None, voice:Any)->bool:
+    # True when `voice` is an engine stock voice id (e.g. kokoro 'af_heart')
+    # rather than a path to an audio file. Callers that also accept paths must
+    # test os.path.exists() first: engines whose GUI values are wav paths keep
+    # their file stems in the same 'voices' mapping.
+    if not isinstance(voice, str) or not isinstance(tts_engine, str):
+        return False
+    return voice in default_engine_settings.get(tts_engine, {}).get('voices', {})
+
 def cleanup_models_cache()->None:
     try:
         active_models = {
@@ -4340,6 +4349,15 @@ def cleanup_models_cache()->None:
             for session in context.sessions.values()
             for cache in (session.get('model_cache'), session.get('model_zs_cache'), session.get('stanza_cache'))
             if cache is not None
+        }
+        # Some adapters (kokoro) qualify their loaded_tts key with the resolved
+        # torch device so a CPU-loaded model is never handed to a CUDA session.
+        # Those keys still belong to an active model_cache value, so keep them
+        # alive instead of evicting the model on every conversion.
+        active_models |= {
+            f"{cache}-{device['proc']}"
+            for cache in list(active_models)
+            for device in devices.values()
         }
         for key in list(loaded_tts.keys()):
             if key not in active_models:
