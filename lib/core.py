@@ -2879,11 +2879,20 @@ def convert_chapters2audio(session_id:str)->bool:
     session = context.get_session(session_id)
     if not (session and session.get('id', False)):
         return False
+    parallel_pool = None
     try:
         if session['cancellation_requested']:
             return False
         print(f'*********** Session: {session_id} **************\n{session_info}')
         tts_manager = TTSManager(session)
+        # Sentence-parallel lane: opt-in per engine ("parallel_safe") + explicit
+        # worker count. Each worker holds its own model, so this stays off for
+        # heavyweight engines; kokoro at ~400 MB/worker is the intended user.
+        _parallel_workers = int(os.environ.get('E2A_PARALLEL_WORKERS', '0') or '0')
+        if _parallel_workers > 1 and default_engine_settings[session['tts_engine']].get('parallel_safe'):
+            from lib.classes.parallel_tts import ParallelSentencePool
+            parallel_pool = ParallelSentencePool(session, _parallel_workers)
+            print(f'Parallel synthesis: {_parallel_workers} workers')
         blocks_current = session['blocks_current']
         blocks = blocks_current['blocks']
         block_resume = blocks_current['block_resume']
@@ -2998,7 +3007,46 @@ def convert_chapters2audio(session_id:str)->bool:
                 save_db_stamp(session_id)
                 converted = False
                 block_voice = block.get('voice') or session.get('voice')
-                for j in range(block_len):
+                if parallel_pool is not None:
+                    # Parallel lane: render every pending sentence of the block
+                    # concurrently. Files land out of order, which the resume
+                    # system already tolerates (missing-file scan per block);
+                    # sentence_resume stays block-granular in this lane.
+                    pending = [
+                        (os.path.join(block_dir, f'{j}.{default_audio_proc_format}'),
+                         sentences[j].strip(), block_voice)
+                        for j in sorted(valid_idx)
+                        if j >= start_sentence or j in missing_sentences
+                    ]
+                    if pending and not baseline_initialized:
+                        session['blocks_current'] = blocks_current
+                        session['blocks_saved'] = copy.deepcopy(blocks_current)
+                        save_json_blocks(session_id, 'blocks_saved')
+                        baseline_initialized = True
+
+                    def _on_done(_file):
+                        t.set_description(f'{(t.n + 1) / total_sentences * 100:.2f}%')
+                        t.update(1)
+
+                    ok, perr = parallel_pool.convert_block(
+                        pending,
+                        cancelled=lambda: session['cancellation_requested'],
+                        on_done=_on_done,
+                    )
+                    if not ok:
+                        show_alert(session_id, {'type': 'warning', 'msg': perr})
+                        return False
+                    converted = bool(pending)
+                    skipped = len(valid_idx) - len(pending)
+                    if skipped > 0:
+                        t.update(skipped)
+                    global_sent += len(valid_idx)
+                    if converted:
+                        blocks_current['sentence_resume'] = last_idx
+                        session['blocks_current'] = blocks_current
+                        save_db_stamp(session_id)
+                        last_save_time = time.monotonic()
+                for j in (range(block_len) if parallel_pool is None else ()):
                     if session['cancellation_requested']:
                         msg = 'Conversion Cancelled'
                         return False
@@ -3052,6 +3100,9 @@ def convert_chapters2audio(session_id:str)->bool:
         DependencyError(e)
         exception_alert(session_id, f'convert_chapters2audio() error: {e}')
         return False
+    finally:
+        if parallel_pool is not None:
+            parallel_pool.shutdown()
 
 def combine_audio_sentences(session_id:str, file:str, block_id:str, sentence_count:int)->bool:
     try:

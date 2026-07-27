@@ -129,6 +129,9 @@ default_engine_settings = {
         # Torch device strings; anything else is normalized to CPU by core
         # BEFORE the memory check (the adapter would fall back to CPU anyway).
         "supported_devices": ["cpu", "cuda"],
+        # Stateless per-sentence synthesis + a ~400 MB model make kokoro safe
+        # and cheap to run sentence-parallel (E2A_PARALLEL_WORKERS).
+        "parallel_safe": True,
         "files": [],
         "voice": None,
         "voices": {
