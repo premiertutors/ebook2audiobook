@@ -6,8 +6,11 @@ and core reconciles a block by scanning for the files already on disk — so
 out-of-order completion needs no new bookkeeping.
 
 The one piece of cross-sentence engine state is an inline [voice: …] scope.
-Core keeps any block whose scope stays open across a sentence boundary in the
-sequential lane, since two workers cannot share that state.
+Two workers cannot share it, so the parent replays the tag stream itself
+(resolve_inline_voices) and tells each task which scope it starts in — the
+worker installs that before rendering instead of inheriting whatever its
+previous sentence left behind. Every block therefore stays in this lane; no
+block needs a sequential fallback, and the parent never loads a model.
 
 Engines opt in with `"parallel_safe": True` in their default settings; the
 worker count comes from E2A_PARALLEL_WORKERS (0/1 = the classic sequential
@@ -48,15 +51,53 @@ def _init_worker(session, torch_threads: int) -> None:
     _WORKER_TTS = TTSManager(session)
 
 
-def _convert_one(sentence_file: str, sentence: str, block_voice) -> tuple:
+def resolve_inline_voices(sentences, indices) -> dict:
+    """Map sentence index -> the ``[voice:...]`` scope in force at its START.
+
+    Engines keep the inline voice on the engine *instance*
+    (``self.params['inline_voice']``): an opening ``[voice:path]`` sets it and
+    only a ``[/voice]`` clears it, so in the sequential lane the scope simply
+    carries from one ``convert()`` call to the next. Replaying the tag stream
+    here lets the parent hand each sentence its own starting scope, so a block
+    whose scope spans sentences can still be rendered out of order.
+
+    ``indices`` must be the sentences the engine actually converts, in order —
+    tags inside skipped sentences are never seen by the engine, so they must
+    not move this state machine either.
+
+    Mirrors ``TTSUtils._convert_sml``: values are ``os.path.abspath``'d, and
+    ``[/voice]`` reverts flatly to "no inline voice" — the engine keeps no
+    stack, so nested scopes collapse rather than restoring an outer one.
+    """
+    from lib.conf_models import SML_TAG_PATTERN
+
+    entry = {}
+    inline = None
+    for j in indices:
+        entry[j] = inline
+        for m in SML_TAG_PATTERN.finditer(sentences[j]):
+            if m.group("tag") != "voice":
+                continue
+            if m.group("close"):
+                inline = None
+            else:
+                value = (m.group("value") or "").strip()
+                if value:
+                    inline = os.path.abspath(value)
+    return entry
+
+
+def _convert_one(sentence_file: str, sentence: str, block_voice, inline_voice) -> tuple:
     try:
-        # A worker is reused for unrelated sentences, so an inline [voice: …]
-        # scope must never bleed from one task into the next. Core keeps any
-        # block whose scope crosses a sentence boundary out of this lane, so
-        # clearing the sticky param here is always the correct starting state.
+        # A worker is reused for unrelated sentences, so the sticky inline
+        # [voice: …] scope must never bleed from one task into the next. Setting
+        # it per task both clears the previous sentence's scope and restores the
+        # one this sentence actually starts in. The tags stay in the sentence
+        # text: a mid-sentence voice change renders as several parts
+        # concatenated into one file, which a single scalar could not express.
         params = getattr(_WORKER_TTS.engine, "params", None)
         if isinstance(params, dict):
-            params["inline_voice"] = None
+            params["inline_voice"] = inline_voice
         return _WORKER_TTS.convert_sentence2audio(
             sentence_file, sentence, block_voice=block_voice
         )
@@ -87,7 +128,7 @@ class ParallelSentencePool:
         )
 
     def convert_block(self, tasks, cancelled, on_done) -> tuple:
-        """Render `tasks` = [(sentence_file, sentence, block_voice)] concurrently.
+        """Render `tasks` = [(sentence_file, sentence, block_voice, inline_voice)].
 
         Calls on_done(sentence_file) as each finishes (progress display).
         Returns (True, None) or (False, error) on the first failure; queued
@@ -98,7 +139,7 @@ class ParallelSentencePool:
         from concurrent.futures import as_completed, wait
 
         futures = {
-            self.executor.submit(_convert_one, f, s, v): f for (f, s, v) in tasks
+            self.executor.submit(_convert_one, f, s, v, iv): f for (f, s, v, iv) in tasks
         }
         error = None
         for future in as_completed(futures):

@@ -2876,21 +2876,6 @@ def convert_chapters2audio(session_id:str)->bool:
     def _count_sentences(sentences:list)->int:
         return sum(1 for s in sentences if any(c.isalnum() for c in s.strip()))
 
-    def _has_cross_sentence_voice(sentences:list)->bool:
-        # An inline [voice: path] scope is engine state that survives across
-        # convert() calls until [/voice] closes it. Sentences rendered by
-        # different worker processes cannot share that state, so a scope left
-        # open at a sentence boundary disqualifies the whole block from the
-        # parallel lane.
-        open_scope = False
-        for s in sentences:
-            for m in SML_TAG_PATTERN.finditer(s):
-                if m.group('tag') == 'voice':
-                    open_scope = not bool(m.group('close'))
-            if open_scope:
-                return True
-        return False
-
     session = context.get_session(session_id)
     if not (session and session.get('id', False)):
         return False
@@ -2915,7 +2900,7 @@ def convert_chapters2audio(session_id:str)->bool:
         # heavyweight engines; kokoro at ~400 MB/worker is the intended user.
         _parallel_workers = int(os.environ.get('E2A_PARALLEL_WORKERS', '0') or '0')
         if _parallel_workers > 1 and default_engine_settings[session['tts_engine']].get('parallel_safe'):
-            from lib.classes.parallel_tts import ParallelSentencePool
+            from lib.classes.parallel_tts import ParallelSentencePool, resolve_inline_voices
             parallel_pool = ParallelSentencePool(session, _parallel_workers)
             print(f'Parallel synthesis: {_parallel_workers} workers')
         blocks_current = session['blocks_current']
@@ -2994,7 +2979,7 @@ def convert_chapters2audio(session_id:str)->bool:
                 block_len = len(sentences)
                 valid_idx = {i for i,s in enumerate(sentences) if any(c.isalnum() for c in s.strip())}
                 last_idx = block_len - 1
-                use_parallel = parallel_pool is not None and not _has_cross_sentence_voice(sentences)
+                use_parallel = parallel_pool is not None
                 sent_start = global_sent
                 current_hash = block_hash(block)
                 block_ref = prev_blocks.get(block_id)
@@ -3047,19 +3032,24 @@ def convert_chapters2audio(session_id:str)->bool:
                 save_db_stamp(session_id)
                 converted = False
                 block_voice = block.get('voice') or session.get('voice')
-                if parallel_pool is not None and not use_parallel:
-                    show_alert(session_id, {'type': 'info', 'msg': f'Block {x} has a [voice:…] scope spanning sentences — rendering it sequentially'})
                 if use_parallel:
                     # Parallel lane: render every pending sentence of the block
                     # concurrently. Files land out of order, so what is already
                     # done is defined by what is already on disk — never by
                     # sentence_resume, which stays block-granular here.
+                    #
+                    # An inline [voice:…] scope spanning sentences is resolved
+                    # here rather than disqualifying the block: each task is
+                    # told the scope it starts in, so no block needs the
+                    # sequential lane and the parent never loads a model.
+                    ordered_idx = sorted(valid_idx)
+                    inline_voices = resolve_inline_voices(sentences, ordered_idx)
                     pending = []
-                    for j in sorted(valid_idx):
+                    for j in ordered_idx:
                         sentence_file = os.path.join(block_dir, f'{j}.{default_audio_proc_format}')
                         if os.path.exists(sentence_file):
                             continue
-                        pending.append((sentence_file, sentences[j].strip(), block_voice))
+                        pending.append((sentence_file, sentences[j].strip(), block_voice, inline_voices[j]))
                     if pending and not baseline_initialized:
                         session['blocks_current'] = blocks_current
                         session['blocks_saved'] = copy.deepcopy(blocks_current)
@@ -3068,7 +3058,7 @@ def convert_chapters2audio(session_id:str)->bool:
                     skipped = len(valid_idx) - len(pending)
                     if skipped > 0:
                         t.update(skipped)
-                    pending_text = {f: s for (f, s, _v) in pending}
+                    pending_text = {f: s for (f, s, _v, _iv) in pending}
 
                     def _on_done(_file):
                         total_progress = (t.n + 1) / total_sentences
