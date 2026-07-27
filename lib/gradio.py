@@ -1154,6 +1154,14 @@ def build_interface(args:dict)->gr.Blocks:
                     print(error)
                     return []
 
+            def _voice_preview_file(voice:Any)->str|None:
+                # gr_voice_player_hidden is a filepath gr.Audio, and play/delete only
+                # apply to a real file. A stock voice id (e.g. kokoro 'af_heart') is a
+                # valid conversion voice but not a path: handing it to the player makes
+                # gradio raise while moving the "file" into its cache, which kills the
+                # whole event. Such a voice previews nothing and offers no file actions.
+                return voice if isinstance(voice, str) and os.path.exists(voice) else None
+
             def _restore_interface(session_id:str, req:gr.Request)->tuple:
                 try:
                     nonlocal translate_options
@@ -1205,9 +1213,9 @@ def build_interface(args:dict)->gr.Blocks:
                         elif session['tts_engine'] == TTS_ENGINES['BARK']:
                             visible_bark = visible_gr_tab_bark_params
                         visible_group_custom_model = visible_gr_group_custom_model if session['fine_tuned'] == 'internal' and session['tts_engine'] in tts_engines_with_custom_model else False
-                        visible_voice_buttons = True if session.get('voice') is not None else False
                         visible_custom_model_del_btn = True if session['custom_model'] is not None else False
-                        voice_file = session.get('voice')
+                        voice_file = _voice_preview_file(session.get('voice'))
+                        visible_voice_buttons = voice_file is not None
                         translate_enabled_state = bool(session.get('translate_enabled'))
                         language = session.get('language')
                         translate = session.get('translate')
@@ -1642,8 +1650,12 @@ def build_interface(args:dict)->gr.Blocks:
                             session['voice_map'] = voice_map
                         else:
                             session['voice'] = new_voice
-                        visible_voice_buttons = new_voice is not None
-                        return gr.update(value=new_voice), gr.update(visible=visible_voice_buttons), gr.update(visible=visible_voice_buttons)
+                        # The selected value stays in session state (a kokoro stock id is
+                        # what the adapter wants), but only a real file reaches the
+                        # filepath player and the play/delete buttons.
+                        preview_file = _voice_preview_file(new_voice)
+                        visible_voice_buttons = preview_file is not None
+                        return gr.update(value=preview_file), gr.update(visible=visible_voice_buttons), gr.update(visible=visible_voice_buttons)
                 except Exception as e:
                     error = f'_change_gr_voice_list(): {e}'
                     exception_alert(session_id, error)
