@@ -76,6 +76,10 @@ class Kokoro(TTSUtils, TTSRegistry, name='kokoro'):
             self.tts_key = f"{self.tts_key}-{self.device}"
             self.pipelines = {}
             self._mapped_voice_cache = {}
+            # Duration substituted for a fragment kokoro cannot phonemize —
+            # long enough to register as a beat in the narration, short enough
+            # not to read as a gap. Overridable for tests.
+            self._silence_ms = float(os.environ.get('E2A_KOKORO_SILENCE_MS', '250'))
             self.engine = self.load_engine()
         except Exception as e:
             error = f'__init__() error: {e}'
@@ -197,8 +201,17 @@ class Kokoro(TTSUtils, TTSRegistry, name='kokoro'):
                                     if audio_chunk is not None and audio_chunk.numel() > 0:
                                         chunks.append(audio_chunk.detach().cpu())
                             if not chunks:
-                                error = f'kokoro pipeline yielded no audio for: {part}'
-                                return False, error
+                                # A fragment whose phonemization yields nothing
+                                # (bare syllable notation like "-yôr-", stray
+                                # markup) must not abort a whole book: emit a
+                                # short silence so the sync map keeps a real,
+                                # nonzero duration for the fragment, and say so.
+                                msg = (f'WARNING: unsynthesizable fragment, '
+                                       f'emitting {int(self._silence_ms)} ms silence for: {part!r}')
+                                print(msg)
+                                chunks.append(torch.zeros(
+                                    int(self.params['samplerate'] * self._silence_ms / 1000.0)
+                                ))
                             audio_part = torch.cat(chunks, dim=-1)
                             if not is_audio_data_valid(audio_part):
                                 error = 'audio_part not valid'
